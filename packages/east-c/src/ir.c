@@ -248,7 +248,8 @@ IRNode *ir_call_async(EastType *type, IRNode *func, IRNode **args, size_t num_ar
 
 IRNode *ir_platform(EastType *type, const char *name,
                     EastType **type_params, size_t num_tp,
-                    IRNode **args, size_t num_args, bool is_async) {
+                    IRNode **args, size_t num_args, bool is_async,
+                    bool optional) {
     IRNode *n = ir_alloc(IR_PLATFORM, type);
     if (!n) return NULL;
     n->data.platform.name = name ? strdup(name) : NULL;
@@ -257,6 +258,7 @@ IRNode *ir_platform(EastType *type, const char *name,
     n->data.platform.args = ir_nodes_dup(args, num_args);
     n->data.platform.num_args = num_args;
     n->data.platform.is_async = is_async;
+    n->data.platform.optional = optional;
     return n;
 }
 

@@ -57,6 +57,7 @@ static EvalResult plat_describe(EastValue **args, size_t num_args)
         name = args[0]->data.string.data;
     }
 
+    const char *prev_describe = g_current_describe;
     g_current_describe = name;
     printf("  %s\n", name);
 
@@ -65,16 +66,19 @@ static EvalResult plat_describe(EastValue **args, size_t num_args)
         EastCompiledFn *body = args[1]->data.function.compiled;
         EvalResult r = east_call(body, NULL, 0);
         if (r.status == EVAL_ERROR) {
-            fprintf(stderr, "    ERROR in describe \"%s\": %s\n",
-                    name, r.error_message ? r.error_message : "?");
+            /* Count as a failed test so errors don't vanish silently */
+            g_tests_run++;
+            g_tests_failed++;
+            printf("    FAIL describe \"%s\": %s\n",
+                   name, r.error_message ? r.error_message : "?");
             eval_result_free(&r);
-            /* Propagate the error */
-            return eval_error("describe body failed");
+        } else {
+            if (r.value) east_value_release(r.value);
+            eval_result_free(&r);
         }
-        if (r.value) east_value_release(r.value);
-        eval_result_free(&r);
     }
 
+    g_current_describe = prev_describe;
     return eval_ok(east_null());
 }
 

@@ -149,6 +149,7 @@ struct IRNode {
             IRNode **args;
             size_t num_args;
             bool is_async;
+            bool optional;
         } platform;
 
         // IR_BUILTIN
@@ -240,7 +241,7 @@ IRNode *ir_function(EastType *type, IRVariable *captures, size_t num_captures, I
 IRNode *ir_async_function(EastType *type, IRVariable *captures, size_t num_captures, IRVariable *params, size_t num_params, IRNode *body);
 IRNode *ir_call(EastType *type, IRNode *func, IRNode **args, size_t num_args);
 IRNode *ir_call_async(EastType *type, IRNode *func, IRNode **args, size_t num_args);
-IRNode *ir_platform(EastType *type, const char *name, EastType **type_params, size_t num_tp, IRNode **args, size_t num_args, bool is_async);
+IRNode *ir_platform(EastType *type, const char *name, EastType **type_params, size_t num_tp, IRNode **args, size_t num_args, bool is_async, bool optional);
 IRNode *ir_builtin(EastType *type, const char *name, EastType **type_params, size_t num_tp, IRNode **args, size_t num_args);
 IRNode *ir_return(EastType *type, IRNode *value);
 IRNode *ir_break(const char *label);
