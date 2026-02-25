@@ -1183,10 +1183,11 @@ static IRNode *convert_ir(EastValue *v)
     if (strcmp(tag, "Platform") == 0) {
         const char *name = get_str(s, "name");
         bool is_async = get_bool(s, "async");
+        bool is_optional = get_bool(s, "optional");
         size_t ntp, nargs;
         EastType **tp = convert_type_array(get_field(s, "type_parameters"), &ntp);
         IRNode **args = convert_ir_array(get_field(s, "arguments"), &nargs);
-        result = with_loc(ir_platform(type, name, tp, ntp, args, nargs, is_async), s);
+        result = with_loc(ir_platform(type, name, tp, ntp, args, nargs, is_async, is_optional), s);
         free_temp_types(tp, ntp);
         free_temp_nodes(args, nargs);
         goto cleanup;

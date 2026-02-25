@@ -574,6 +574,13 @@ EvalResult eval_ir(IRNode *node, Environment *env,
             node->data.platform.type_params,
             node->data.platform.num_type_params);
         if (!pfn) {
+            if (node->data.platform.optional) {
+                char buf[256];
+                snprintf(buf, sizeof(buf),
+                         "Platform function '%s' is not available",
+                         node->data.platform.name);
+                return eval_error_at_owned(strdup(buf), node);
+            }
             char buf[256];
             snprintf(buf, sizeof(buf),
                      "Unknown platform function: %s",
