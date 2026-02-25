@@ -1,0 +1,68 @@
+name: Update Dependencies
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * 1' # weekly Monday
+
+jobs:
+  check-compatibility:
+    name: Check upstream compatibility
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout east repo
+        uses: actions/checkout@v4
+        with:
+          repository: elaraai/east
+          path: east-ts
+
+      - name: Checkout east-node repo
+        uses: actions/checkout@v4
+        with:
+          repository: elaraai/east-node
+          path: east-node
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build and export IR from east-ts
+        working-directory: east-ts
+        run: |
+          npm ci
+          npm run build
+          npm run test:export
+        env:
+          EXPORT_TEST_IR: /tmp/east-test-ir
+
+      - name: Build and export IR from east-node
+        working-directory: east-node
+        run: |
+          npm ci
+          npm run build
+          npm run test:export --workspace=@elaraai/east-node-std
+        env:
+          EXPORT_TEST_IR: /tmp/east-node-std
+
+      - name: Build east-c
+        run: make build
+
+      - name: Run unit tests
+        run: cd build && ctest --output-on-failure
+
+      - name: Run core compliance tests
+        run: ./scripts/run_compliance.sh /tmp/east-test-ir
+
+      - name: Start test services
+        run: docker compose up -d --wait
+
+      - name: Run std compliance tests
+        run: ./scripts/run_compliance.sh /tmp/east-node-std build/packages/east-c-std/test_std_compliance
+
+      - name: Stop test services
+        if: always()
+        run: docker compose down -v

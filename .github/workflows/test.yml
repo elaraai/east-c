@@ -1,0 +1,93 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-east-c:
+    name: Test east-c
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout east repo for test IR generation
+        uses: actions/checkout@v4
+        with:
+          repository: elaraai/east
+          path: east-ts
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install east-ts dependencies and build
+        working-directory: east-ts
+        run: |
+          npm ci
+          npm run build
+
+      - name: Export test IR
+        working-directory: east-ts
+        run: npm run test:export
+        env:
+          EXPORT_TEST_IR: /tmp/east-test-ir
+
+      - name: Build east-c
+        run: make build
+
+      - name: Run unit tests
+        run: cd build && ctest --output-on-failure
+
+      - name: Run compliance tests
+        run: ./scripts/run_compliance.sh /tmp/east-test-ir
+
+  test-east-c-std:
+    name: Test east-c-std
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout east-node repo for test IR generation
+        uses: actions/checkout@v4
+        with:
+          repository: elaraai/east-node
+          path: east-node
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install east-node dependencies and build
+        working-directory: east-node
+        run: |
+          npm ci
+          npm run build
+
+      - name: Export test IR from east-node-std
+        working-directory: east-node
+        run: npm run test:export --workspace=@elaraai/east-node-std
+        env:
+          EXPORT_TEST_IR: /tmp/east-node-std
+
+      - name: Start test services
+        run: docker compose up -d --wait
+
+      - name: Build east-c
+        run: make build
+
+      - name: Run unit tests
+        run: cd build && ctest --output-on-failure
+
+      - name: Run std compliance tests
+        run: ./scripts/run_compliance.sh /tmp/east-node-std build/packages/east-c-std/test_std_compliance
+
+      - name: Stop test services
+        if: always()
+        run: docker compose down -v
