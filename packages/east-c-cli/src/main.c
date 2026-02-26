@@ -22,8 +22,13 @@ static double elapsed_ms(struct timespec *start, struct timespec *end)
          + (double)(end->tv_nsec - start->tv_nsec) / 1e6;
 }
 
-#define CLI_VERSION "0.1.0"
-#define RUNTIME_VERSION "0.1.0"
+/* Version is set by CMake from the VERSION file */
+#ifndef EAST_CLI_VERSION
+#define EAST_CLI_VERSION "0.0.0-dev"
+#endif
+#ifndef EAST_RUNTIME_VERSION
+#define EAST_RUNTIME_VERSION "0.0.0-dev"
+#endif
 #define MAX_PACKAGES 16
 #define MAX_INPUTS 64
 
@@ -509,8 +514,8 @@ static int cmd_run(const char *ir_path,
 
 static int cmd_version(const char **packages, int num_packages)
 {
-    printf("east-c-cli %s\n", CLI_VERSION);
-    printf("east-c %s\n", RUNTIME_VERSION);
+    printf("east-c-cli %s\n", EAST_CLI_VERSION);
+    printf("east-c %s\n", EAST_RUNTIME_VERSION);
 
     if (num_packages > 0) {
         printf("\nPlatforms:\n");
@@ -521,7 +526,7 @@ static int cmd_version(const char **packages, int num_packages)
                 east_std_register_all(tmp);
                 size_t fn_count = hashmap_count(tmp->functions)
                                 + hashmap_count(tmp->generic_functions);
-                printf("  east-c-std %s (%zu platform functions)\n", RUNTIME_VERSION, fn_count);
+                printf("  east-c-std %s (%zu platform functions)\n", EAST_RUNTIME_VERSION, fn_count);
                 platform_registry_free(tmp);
             } else {
                 printf("  %s: not available\n", packages[i]);

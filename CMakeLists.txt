@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
-project(east-c C)
+
+# Read version from VERSION file
+file(READ "${CMAKE_SOURCE_DIR}/VERSION" EAST_VERSION)
+string(STRIP "${EAST_VERSION}" EAST_VERSION)
+
+project(east-c VERSION ${EAST_VERSION} LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
