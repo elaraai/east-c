@@ -123,6 +123,37 @@ static bool config_get_bool(EastValue *config, const char *field, bool def)
     return inner->data.boolean;
 }
 
+/* Get an optional Dict<String,String> field from config struct.
+ * Returns the dict EastValue* or NULL if none. */
+static EastValue *config_get_dict(EastValue *config, const char *field)
+{
+    if (!config || config->kind != EAST_VAL_STRUCT) return NULL;
+    EastValue *v = east_struct_get_field(config, field);
+    if (!v || v->kind != EAST_VAL_VARIANT) return NULL;
+    if (strcmp(v->data.variant.case_name, "some") != 0) return NULL;
+    EastValue *inner = v->data.variant.value;
+    if (!inner || inner->kind != EAST_VAL_DICT) return NULL;
+    return inner;
+}
+
+/* Look up a string key in a Dict<String,String>. Returns the mapped value
+ * string or NULL if not found. The returned pointer is borrowed. */
+static const char *dict_lookup_string(EastValue *dict, const char *key)
+{
+    if (!dict) return NULL;
+    for (size_t i = 0; i < dict->data.dict.len; i++) {
+        EastValue *k = dict->data.dict.keys[i];
+        if (k && k->kind == EAST_VAL_STRING &&
+            strcmp(k->data.string.data, key) == 0) {
+            EastValue *v = dict->data.dict.values[i];
+            if (v && v->kind == EAST_VAL_STRING)
+                return v->data.string.data;
+            return NULL;
+        }
+    }
+    return NULL;
+}
+
 /* Get optional nullStrings array. Returns count and sets *out.
  * Caller must not free the strings (they belong to the config value).
  * Returns -1 if not set. */
@@ -770,11 +801,19 @@ EastValue *east_csv_decode(const char *csv, EastType *type, EastValue *config)
         FieldArray header = csv_parse_row(csv, data_len, &offset, &is_end,
                                            opts.delimiter, opts.quote_char, opts.escape_char);
 
+        /* Get optional columnMapping: Dict<String,String> mapping
+         * CSV header names -> struct field names */
+        EastValue *col_mapping = config_get_dict(config, "columnMapping");
+
         for (size_t f = 0; f < nf; f++) {
             col_indices[f] = -1;
             const char *fname = elem_type->data.struct_.fields[f].name;
             for (size_t h = 0; h < header.count; h++) {
-                if (strcmp(header.fields[h], fname) == 0) {
+                /* Apply columnMapping: if the header has a mapping,
+                 * use the mapped name for comparison */
+                const char *mapped = dict_lookup_string(col_mapping, header.fields[h]);
+                const char *hname = mapped ? mapped : header.fields[h];
+                if (strcmp(hname, fname) == 0) {
                     col_indices[f] = (int)h;
                     break;
                 }
@@ -798,9 +837,11 @@ EastValue *east_csv_decode(const char *csv, EastType *type, EastValue *config)
         /* Strict mode: check for extra columns */
         if (opts.strict) {
             for (size_t h = 0; h < header.count; h++) {
+                const char *mapped = dict_lookup_string(col_mapping, header.fields[h]);
+                const char *hname = mapped ? mapped : header.fields[h];
                 bool found = false;
                 for (size_t f = 0; f < nf; f++) {
-                    if (strcmp(header.fields[h], elem_type->data.struct_.fields[f].name) == 0) {
+                    if (strcmp(hname, elem_type->data.struct_.fields[f].name) == 0) {
                         found = true;
                         break;
                     }
