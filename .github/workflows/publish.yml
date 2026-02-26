@@ -1,0 +1,192 @@
+name: Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release type'
+        required: true
+        default: 'prerelease'
+        type: choice
+        options:
+          - prerelease   # 0.0.1-beta.7 -> 0.0.1-beta.8
+          - prepatch     # 0.0.1-beta.8 -> 0.0.2-beta.0
+          - preminor     # 0.0.1-beta.8 -> 0.1.0-beta.0
+          - premajor     # 0.0.1-beta.8 -> 1.0.0-beta.0
+          - patch        # 0.0.1 -> 0.0.2
+          - minor        # 0.0.1 -> 0.1.0
+          - major        # 0.0.1 -> 1.0.0
+      dry_run:
+        description: 'Dry run (skip actual publish)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  version:
+    name: Bump version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      new_version: ${{ steps.bump.outputs.new_version }}
+      is_prerelease: ${{ steps.bump.outputs.is_prerelease }}
+
+    steps:
+      - name: Generate app token
+        uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Configure git
+        run: |
+          git config user.name "elara-ci[bot]"
+          git config user.email "elara-ci[bot]@users.noreply.github.com"
+
+      - name: Bump version
+        id: bump
+        run: |
+          current=$(cat VERSION | tr -d '[:space:]')
+
+          # Parse base version (strip prerelease suffix)
+          base=$(echo "$current" | sed 's/-.*//')
+          IFS='.' read -r major minor patch <<< "$base"
+
+          # Check for existing prerelease suffix
+          pre_suffix=$(echo "$current" | grep -oP -- '-.*' || echo "")
+          beta_num=-1
+          if [[ -n "$pre_suffix" ]]; then
+            beta_num=$(echo "$pre_suffix" | grep -oP 'beta\.\K[0-9]+' || echo "-1")
+          fi
+
+          case "${{ inputs.release_type }}" in
+            prerelease)
+              if [[ -n "$pre_suffix" ]]; then
+                beta_num=$((beta_num + 1))
+                new_version="${major}.${minor}.${patch}-beta.${beta_num}"
+              else
+                patch=$((patch + 1))
+                new_version="${major}.${minor}.${patch}-beta.0"
+              fi
+              ;;
+            prepatch)
+              patch=$((patch + 1))
+              new_version="${major}.${minor}.${patch}-beta.0"
+              ;;
+            preminor)
+              minor=$((minor + 1))
+              new_version="${major}.${minor}.0-beta.0"
+              ;;
+            premajor)
+              major=$((major + 1))
+              new_version="${major}.0.0-beta.0"
+              ;;
+            patch)
+              if [[ -n "$pre_suffix" ]]; then
+                new_version="${major}.${minor}.${patch}"
+              else
+                patch=$((patch + 1))
+                new_version="${major}.${minor}.${patch}"
+              fi
+              ;;
+            minor)
+              minor=$((minor + 1))
+              new_version="${major}.${minor}.0"
+              ;;
+            major)
+              major=$((major + 1))
+              new_version="${major}.0.0"
+              ;;
+          esac
+
+          echo "$new_version" > VERSION
+          echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
+
+          if [[ "${{ inputs.release_type }}" == pre* ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "Version: $current -> $new_version"
+
+      - name: Commit and tag
+        if: ${{ !inputs.dry_run }}
+        run: |
+          git add VERSION
+          git commit -m "chore: bump version to ${{ steps.bump.outputs.new_version }}"
+          git tag "${{ steps.bump.outputs.new_version }}"
+          git push origin HEAD --tags
+
+  build:
+    name: Build ${{ matrix.artifact }}
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: east-c-linux-amd64
+          - os: macos-latest
+            artifact: east-c-macos-arm64
+          - os: macos-13
+            artifact: east-c-macos-amd64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.dry_run && '' || needs.version.outputs.new_version }}
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+
+      - name: Build
+        run: |
+          mkdir build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release
+          cmake --build . -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
+
+      - name: Run unit tests
+        run: cd build && ctest --output-on-failure
+
+      - name: Prepare artifact
+        run: |
+          cp build/packages/east-c-cli/east-c ${{ matrix.artifact }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    name: Create release
+    needs: [version, build]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.new_version }}
+          name: ${{ needs.version.outputs.new_version }}
+          generate_release_notes: true
+          prerelease: ${{ needs.version.outputs.is_prerelease == 'true' }}
+          files: artifacts/*
