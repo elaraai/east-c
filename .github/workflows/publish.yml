@@ -132,10 +132,13 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact: east-c-linux-amd64
+            cmake_flags: ''
           - os: macos-latest
             artifact: east-c-macos-arm64
-          - os: macos-13
+            cmake_flags: ''
+          - os: macos-latest
             artifact: east-c-macos-amd64
+            cmake_flags: '-DCMAKE_OSX_ARCHITECTURES=x86_64'
 
     runs-on: ${{ matrix.os }}
 
@@ -151,10 +154,11 @@ jobs:
       - name: Build
         run: |
           mkdir build && cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release
+          cmake .. -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_flags }}
           cmake --build . -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
 
       - name: Run unit tests
+        if: ${{ matrix.cmake_flags == '' }}
         run: cd build && ctest --output-on-failure
 
       - name: Prepare artifact
