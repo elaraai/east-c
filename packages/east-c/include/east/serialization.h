@@ -40,6 +40,9 @@ EastValue *east_beast_decode(const uint8_t *data, size_t len, EastType *type);
 // config may be NULL for defaults, or an EastValue struct with Option fields
 char *east_csv_encode(EastValue *array, EastType *type, EastValue *config);
 EastValue *east_csv_decode(const char *csv, EastType *type, EastValue *config);
+// CSV decode with detailed error message (caller frees *error_out on failure)
+EastValue *east_csv_decode_with_error(const char *csv, EastType *type,
+                                       EastValue *config, char **error_out);
 
 // East text format
 char *east_print_value(EastValue *value, EastType *type);

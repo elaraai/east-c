@@ -274,11 +274,16 @@ static EastValue *blob_decode_csv(EastValue **args, size_t n) {
 
     /* args[0] = blob, args[1] = config (optional) */
     EastValue *config = (n > 1) ? args[1] : NULL;
-    EastValue *result = east_csv_decode(csv_copy, arr_type, config);
+    char *error_msg = NULL;
+    EastValue *result = east_csv_decode_with_error(csv_copy, arr_type, config, &error_msg);
     free(csv_copy);
     east_type_release(arr_type);
 
-    if (!result) return east_array_new(struct_type);
+    if (!result) {
+        east_builtin_error(error_msg ? error_msg : "Failed to decode CSV data");
+        free(error_msg);
+        return NULL;
+    }
     return result;
 }
 
