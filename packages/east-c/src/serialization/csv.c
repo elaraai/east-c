@@ -18,6 +18,7 @@
 
 #include <ctype.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -73,6 +74,39 @@ static void csvbuf_append_char(CsvBuf *sb, char c)
     csvbuf_ensure(sb, 1);
     sb->data[sb->len++] = c;
     sb->data[sb->len] = '\0';
+}
+
+/* ================================================================== */
+/*  Error formatting helpers                                           */
+/* ================================================================== */
+
+static char *format_csv_error(const char *fmt, ...)
+{
+    va_list ap, ap2;
+    va_start(ap, fmt);
+    va_copy(ap2, ap);
+    int len = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    char *msg = NULL;
+    if (len >= 0) {
+        msg = malloc((size_t)len + 1);
+        if (msg) vsnprintf(msg, (size_t)len + 1, fmt, ap2);
+    }
+    va_end(ap2);
+    return msg;
+}
+
+/* Format a full CSV error with location info:
+ * "CSV error: {msg} at row {r}, column {c} ({name})" */
+static char *format_csv_error_with_location(const char *msg,
+                                             int row, int col,
+                                             const char *col_name)
+{
+    if (col_name) {
+        return format_csv_error("CSV error: %s at row %d, column %d (%s)",
+                                msg, row, col, col_name);
+    }
+    return format_csv_error("CSV error: %s at row %d, column %d", msg, row, col);
 }
 
 /* ================================================================== */
@@ -524,7 +558,8 @@ static void field_array_free(FieldArray *fa)
  * Sets *is_end to true if we've reached end of data. */
 static FieldArray csv_parse_row(const char *data, size_t data_len,
                                 size_t *offset, bool *is_end,
-                                char delim, char quote, char escape)
+                                char delim, char quote, char escape,
+                                bool *unclosed_quote)
 {
     FieldArray fa = field_array_new();
     CsvBuf field = csvbuf_new(64);
@@ -578,8 +613,7 @@ static FieldArray csv_parse_row(const char *data, size_t data_len,
 
     /* End of data */
     if (in_quote) {
-        /* Unclosed quote - signal error by returning what we have.
-         * The caller (builtin) handles the error. */
+        if (unclosed_quote) *unclosed_quote = true;
     }
     field_array_push(&fa, field.data, field.len);
     *offset = i;
@@ -603,7 +637,9 @@ static bool csv_row_is_empty(FieldArray *fa)
 /* ================================================================== */
 
 static EastValue *csv_parse_field(const char *str, EastType *type,
-                                   const CsvDecodeOpts *opts)
+                                   const CsvDecodeOpts *opts,
+                                   char **error_out,
+                                   const char *field_name)
 {
     if (!str) return east_null();
 
@@ -633,7 +669,10 @@ static EastValue *csv_parse_field(const char *str, EastType *type,
         if (is_opt) {
             return east_variant_new("none", east_null(), NULL);
         } else {
-            /* Null for required field - return error via NULL */
+            /* Null for required field */
+            if (error_out)
+                *error_out = format_csv_error(
+                    "null value for required field '%s'", field_name ? field_name : "?");
             return NULL;
         }
     }
@@ -643,18 +682,45 @@ static EastValue *csv_parse_field(const char *str, EastType *type,
 
     switch (base_type->kind) {
     case EAST_TYPE_NULL:
-        parsed = east_null();
+        /* C3: Only accept "" and "null" */
+        if (strcmp(str, "") == 0 || strcmp(str, "null") == 0) {
+            parsed = east_null();
+        } else {
+            if (error_out)
+                *error_out = format_csv_error("expected null, got '%s'", str);
+        }
         break;
 
     case EAST_TYPE_BOOLEAN:
         if (strcmp(str, "true") == 0) parsed = east_boolean(true);
         else if (strcmp(str, "false") == 0) parsed = east_boolean(false);
+        else if (error_out)
+            *error_out = format_csv_error("expected 'true' or 'false', got '%s'", str);
         break;
 
     case EAST_TYPE_INTEGER: {
-        char *end;
-        long long val = strtoll(str, &end, 10);
-        if (*end == '\0') parsed = east_integer((int64_t)val);
+        /* C8: Reject leading/trailing whitespace — validate with regex-like check */
+        const char *p = str;
+        if (*p == '\0') {
+            if (error_out)
+                *error_out = format_csv_error("expected integer, got '%s'", str);
+            break;
+        }
+        const char *start = p;
+        if (*p == '-') p++;
+        if (*p == '\0' || !isdigit((unsigned char)*p)) {
+            if (error_out)
+                *error_out = format_csv_error("expected integer, got '%s'", str);
+            break;
+        }
+        while (isdigit((unsigned char)*p)) p++;
+        if (*p != '\0') {
+            if (error_out)
+                *error_out = format_csv_error("expected integer, got '%s'", str);
+            break;
+        }
+        long long val = strtoll(start, NULL, 10);
+        parsed = east_integer((int64_t)val);
         break;
     }
 
@@ -666,9 +732,27 @@ static EastValue *csv_parse_field(const char *str, EastType *type,
             parsed = east_float(-0.0);
             break;
         }
-        char *end;
-        double val = strtod(str, &end);
-        if (*end == '\0') parsed = east_float(val);
+        /* C8: Reject leading/trailing whitespace */
+        if (str[0] != '\0' && (isspace((unsigned char)str[0]) ||
+            isspace((unsigned char)str[strlen(str) - 1]))) {
+            if (error_out)
+                *error_out = format_csv_error("expected float, got '%s'", str);
+            break;
+        }
+        /* Validate entire string is consumed */
+        if (str[0] == '\0') {
+            if (error_out)
+                *error_out = format_csv_error("expected float, got '%s'", str);
+            break;
+        }
+        char *endp;
+        double val = strtod(str, &endp);
+        if (*endp != '\0') {
+            if (error_out)
+                *error_out = format_csv_error("expected float, got '%s'", str);
+            break;
+        }
+        parsed = east_float(val);
         break;
     }
 
@@ -677,24 +761,47 @@ static EastValue *csv_parse_field(const char *str, EastType *type,
         break;
 
     case EAST_TYPE_DATETIME: {
-        int year = 0, month = 0, day = 0, hour = 0, min = 0, sec = 0, ms = 0;
+        /* C2: Validate ISO 8601 format: YYYY-MM-DDTHH:MM:SS */
         size_t slen = strlen(str);
+        if (slen < 19 ||
+            !isdigit((unsigned char)str[0]) || !isdigit((unsigned char)str[1]) ||
+            !isdigit((unsigned char)str[2]) || !isdigit((unsigned char)str[3]) ||
+            str[4] != '-' ||
+            !isdigit((unsigned char)str[5]) || !isdigit((unsigned char)str[6]) ||
+            str[7] != '-' ||
+            !isdigit((unsigned char)str[8]) || !isdigit((unsigned char)str[9]) ||
+            str[10] != 'T' ||
+            !isdigit((unsigned char)str[11]) || !isdigit((unsigned char)str[12]) ||
+            str[13] != ':' ||
+            !isdigit((unsigned char)str[14]) || !isdigit((unsigned char)str[15]) ||
+            str[16] != ':' ||
+            !isdigit((unsigned char)str[17]) || !isdigit((unsigned char)str[18]))
+        {
+            if (error_out)
+                *error_out = format_csv_error("expected ISO 8601 date, got '%s'", str);
+            break;
+        }
 
-        if (slen >= 19) {
-            sscanf(str, "%d-%d-%dT%d:%d:%d",
-                   &year, &month, &day, &hour, &min, &sec);
-            const char *dot = strchr(str, '.');
-            if (dot) {
-                sscanf(dot + 1, "%d", &ms);
-                size_t digits = 0;
-                const char *dp = dot + 1;
-                while (*dp >= '0' && *dp <= '9') { digits++; dp++; }
-                if (digits > 3) {
-                    char msbuf[4];
-                    memcpy(msbuf, dot + 1, 3);
-                    msbuf[3] = '\0';
-                    ms = atoi(msbuf);
-                }
+        int year = 0, month = 0, day = 0, hour = 0, min = 0, sec = 0, ms = 0;
+        int scanned = sscanf(str, "%d-%d-%dT%d:%d:%d",
+                             &year, &month, &day, &hour, &min, &sec);
+        if (scanned < 6) {
+            if (error_out)
+                *error_out = format_csv_error("expected ISO 8601 date, got '%s'", str);
+            break;
+        }
+
+        const char *dot = strchr(str, '.');
+        if (dot) {
+            sscanf(dot + 1, "%d", &ms);
+            size_t digits = 0;
+            const char *dp = dot + 1;
+            while (*dp >= '0' && *dp <= '9') { digits++; dp++; }
+            if (digits > 3) {
+                char msbuf[4];
+                memcpy(msbuf, dot + 1, 3);
+                msbuf[3] = '\0';
+                ms = atoi(msbuf);
             }
         }
 
@@ -726,27 +833,51 @@ static EastValue *csv_parse_field(const char *str, EastType *type,
     }
 
     case EAST_TYPE_BLOB: {
-        if (strncmp(str, "0x", 2) != 0) break;
+        /* C4: Validate hex prefix */
+        if (strncmp(str, "0x", 2) != 0) {
+            if (error_out)
+                *error_out = format_csv_error(
+                    "expected hex string starting with '0x', got '%s'", str);
+            break;
+        }
         const char *hex = str + 2;
         size_t hlen = strlen(hex);
-        if (hlen % 2 != 0) break;
-
-        size_t blen = hlen / 2;
-        uint8_t *bdata = malloc(blen);
-        if (!bdata) break;
-
-        for (size_t i = 0; i < blen; i++) {
-            char byte_str[3] = { hex[i*2], hex[i*2+1], '\0' };
-            bdata[i] = (uint8_t)strtoul(byte_str, NULL, 16);
+        if (hlen % 2 != 0) {
+            if (error_out)
+                *error_out = format_csv_error("invalid hex string '%s'", str);
+            break;
         }
 
-        parsed = east_blob(bdata, blen);
-        free(bdata);
+        /* Validate all hex chars */
+        for (size_t i = 0; i < hlen; i++) {
+            if (!isxdigit((unsigned char)hex[i])) {
+                if (error_out)
+                    *error_out = format_csv_error("invalid hex string '%s'", str);
+                goto blob_done;
+            }
+        }
+
+        {
+            size_t blen = hlen / 2;
+            uint8_t *bdata = malloc(blen);
+            if (!bdata) break;
+
+            for (size_t i = 0; i < blen; i++) {
+                char byte_str[3] = { hex[i*2], hex[i*2+1], '\0' };
+                bdata[i] = (uint8_t)strtoul(byte_str, NULL, 16);
+            }
+
+            parsed = east_blob(bdata, blen);
+            free(bdata);
+        }
+    blob_done:
         break;
     }
 
     default:
-        parsed = east_null();
+        /* C5: Unsupported type - leave parsed as NULL */
+        if (error_out)
+            *error_out = format_csv_error("unsupported field type");
         break;
     }
 
@@ -767,8 +898,11 @@ static EastValue *csv_parse_field(const char *str, EastType *type,
 /*  CSV Decoder: CSV string -> Array<Struct>                           */
 /* ================================================================== */
 
-EastValue *east_csv_decode(const char *csv, EastType *type, EastValue *config)
+EastValue *east_csv_decode_with_error(const char *csv, EastType *type,
+                                       EastValue *config, char **error_out)
 {
+    if (error_out) *error_out = NULL;
+
     if (!csv || !type) return NULL;
     if (type->kind != EAST_TYPE_ARRAY) return NULL;
 
@@ -798,8 +932,19 @@ EastValue *east_csv_decode(const char *csv, EastType *type, EastValue *config)
 
     if (opts.has_header) {
         /* Parse header row */
+        bool unclosed_quote = false;
         FieldArray header = csv_parse_row(csv, data_len, &offset, &is_end,
-                                           opts.delimiter, opts.quote_char, opts.escape_char);
+                                           opts.delimiter, opts.quote_char, opts.escape_char,
+                                           &unclosed_quote);
+
+        if (unclosed_quote) {
+            if (error_out)
+                *error_out = format_csv_error("CSV error: unclosed quote at end of file");
+            field_array_free(&header);
+            free(col_indices);
+            decode_opts_free(&opts);
+            return NULL;
+        }
 
         /* Get optional columnMapping: Dict<String,String> mapping
          * CSV header names -> struct field names */
@@ -826,6 +971,10 @@ EastValue *east_csv_decode(const char *csv, EastType *type, EastValue *config)
                 EastType *ftype = elem_type->data.struct_.fields[f].type;
                 if (!is_option_type(ftype)) {
                     /* Missing required column - error */
+                    if (error_out)
+                        *error_out = format_csv_error(
+                            "CSV error: missing required column '%s'",
+                            elem_type->data.struct_.fields[f].name);
                     field_array_free(&header);
                     free(col_indices);
                     decode_opts_free(&opts);
@@ -847,6 +996,9 @@ EastValue *east_csv_decode(const char *csv, EastType *type, EastValue *config)
                     }
                 }
                 if (!found) {
+                    if (error_out)
+                        *error_out = format_csv_error(
+                            "CSV error: unexpected column '%s' in strict mode", hname);
                     field_array_free(&header);
                     free(col_indices);
                     decode_opts_free(&opts);
@@ -871,9 +1023,22 @@ EastValue *east_csv_decode(const char *csv, EastType *type, EastValue *config)
         return NULL;
     }
 
+    int row_num = 1;
     while (offset < data_len && !is_end) {
+        bool unclosed_quote = false;
         FieldArray row = csv_parse_row(csv, data_len, &offset, &is_end,
-                                        opts.delimiter, opts.quote_char, opts.escape_char);
+                                        opts.delimiter, opts.quote_char, opts.escape_char,
+                                        &unclosed_quote);
+
+        if (unclosed_quote) {
+            if (error_out)
+                *error_out = format_csv_error("CSV error: unclosed quote at end of file");
+            field_array_free(&row);
+            east_value_release(result);
+            free(col_indices);
+            decode_opts_free(&opts);
+            return NULL;
+        }
 
         /* Skip empty rows (unless skipEmptyLines is false) */
         if (opts.skip_empty_lines && csv_row_is_empty(&row)) {
@@ -895,25 +1060,45 @@ EastValue *east_csv_decode(const char *csv, EastType *type, EastValue *config)
         for (size_t f = 0; f < nf; f++) {
             names[f] = elem_type->data.struct_.fields[f].name;
             EastType *ftype = elem_type->data.struct_.fields[f].type;
+            const char *fname = elem_type->data.struct_.fields[f].name;
             int ci = col_indices[f];
 
             if (ci >= 0 && (size_t)ci < row.count) {
-                values[f] = csv_parse_field(row.fields[ci], ftype, &opts);
+                char *field_error = NULL;
+                values[f] = csv_parse_field(row.fields[ci], ftype, &opts,
+                                            &field_error, fname);
                 if (!values[f]) {
-                    /* Parse error - null for required field or type error */
+                    /* Parse error — format full location message */
+                    if (error_out && field_error) {
+                        *error_out = format_csv_error_with_location(
+                            field_error, row_num, ci, fname);
+                    }
+                    free(field_error);
                     row_ok = false;
-                    /* Clean up already-parsed values */
+                    for (size_t j = 0; j < f; j++)
+                        east_value_release(values[j]);
+                    break;
+                }
+            } else if (ci >= 0) {
+                /* C6: Row has too few fields for required column */
+                if (is_option_type(ftype)) {
+                    values[f] = east_variant_new("none", east_null(), NULL);
+                } else {
+                    char *msg = format_csv_error(
+                        "row has %zu fields, expected at least %d",
+                        row.count, ci + 1);
+                    if (error_out && msg)
+                        *error_out = format_csv_error_with_location(
+                            msg, row_num, ci, fname);
+                    free(msg);
+                    row_ok = false;
                     for (size_t j = 0; j < f; j++)
                         east_value_release(values[j]);
                     break;
                 }
             } else {
-                /* Column missing from this row */
-                if (is_option_type(ftype)) {
-                    values[f] = east_variant_new("none", east_null(), NULL);
-                } else {
-                    values[f] = east_null();
-                }
+                /* Column not in header at all */
+                values[f] = east_variant_new("none", east_null(), NULL);
             }
         }
 
@@ -939,10 +1124,16 @@ EastValue *east_csv_decode(const char *csv, EastType *type, EastValue *config)
             return NULL;
         }
 
+        row_num++;
         if (is_end) break;
     }
 
     free(col_indices);
     decode_opts_free(&opts);
     return result;
+}
+
+EastValue *east_csv_decode(const char *csv, EastType *type, EastValue *config)
+{
+    return east_csv_decode_with_error(csv, type, config, NULL);
 }
