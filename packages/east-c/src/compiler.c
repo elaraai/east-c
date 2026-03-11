@@ -290,6 +290,7 @@ EvalResult eval_ir(IRNode *node, Environment *env,
         const char *loop_label = node->data.for_array.label;
         bool should_break = false;
 
+        arr->iter_lock++;
         for (size_t i = 0; i < len; i++) {
             Environment *iter_env = env_new(env);
 
@@ -313,6 +314,7 @@ EvalResult eval_ir(IRNode *node, Environment *env,
                     should_break = true;
                     break;
                 }
+                arr->iter_lock--;
                 east_value_release(arr);
                 return body_res;
             }
@@ -321,15 +323,18 @@ EvalResult eval_ir(IRNode *node, Environment *env,
                     eval_result_free(&body_res);
                     continue;
                 }
+                arr->iter_lock--;
                 east_value_release(arr);
                 return body_res;
             }
             if (body_res.status != EVAL_OK) {
+                arr->iter_lock--;
                 east_value_release(arr);
                 return body_res;
             }
             east_value_release(body_res.value);
         }
+        arr->iter_lock--;
 
         east_value_release(arr);
         (void)should_break;
@@ -352,6 +357,7 @@ EvalResult eval_ir(IRNode *node, Environment *env,
         const char *loop_label = node->data.for_set.label;
         bool should_break = false;
 
+        set->iter_lock++;
         for (size_t i = 0; i < len; i++) {
             Environment *iter_env = env_new(env);
 
@@ -369,6 +375,7 @@ EvalResult eval_ir(IRNode *node, Environment *env,
                     should_break = true;
                     break;
                 }
+                set->iter_lock--;
                 east_value_release(set);
                 return body_res;
             }
@@ -377,15 +384,18 @@ EvalResult eval_ir(IRNode *node, Environment *env,
                     eval_result_free(&body_res);
                     continue;
                 }
+                set->iter_lock--;
                 east_value_release(set);
                 return body_res;
             }
             if (body_res.status != EVAL_OK) {
+                set->iter_lock--;
                 east_value_release(set);
                 return body_res;
             }
             east_value_release(body_res.value);
         }
+        set->iter_lock--;
 
         east_value_release(set);
         (void)should_break;
@@ -408,6 +418,7 @@ EvalResult eval_ir(IRNode *node, Environment *env,
         const char *loop_label = node->data.for_dict.label;
         bool should_break = false;
 
+        dict->iter_lock++;
         for (size_t i = 0; i < len; i++) {
             Environment *iter_env = env_new(env);
 
@@ -427,6 +438,7 @@ EvalResult eval_ir(IRNode *node, Environment *env,
                     should_break = true;
                     break;
                 }
+                dict->iter_lock--;
                 east_value_release(dict);
                 return body_res;
             }
@@ -435,15 +447,18 @@ EvalResult eval_ir(IRNode *node, Environment *env,
                     eval_result_free(&body_res);
                     continue;
                 }
+                dict->iter_lock--;
                 east_value_release(dict);
                 return body_res;
             }
             if (body_res.status != EVAL_OK) {
+                dict->iter_lock--;
                 east_value_release(dict);
                 return body_res;
             }
             east_value_release(body_res.value);
         }
+        dict->iter_lock--;
 
         east_value_release(dict);
         (void)should_break;

@@ -9,21 +9,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Helper: infer type from value kind for printing */
-static EastType *type_for_value(EastValue *v) {
-    if (!v) return &east_null_type;
-    switch (v->kind) {
-    case EAST_VAL_INTEGER: return &east_integer_type;
-    case EAST_VAL_FLOAT:   return &east_float_type;
-    case EAST_VAL_BOOLEAN: return &east_boolean_type;
-    case EAST_VAL_STRING:  return &east_string_type;
-    default:               return &east_null_type;
-    }
-}
+/* Key type for error messages, set by factories from type_params[0] (K) */
+static _Thread_local EastType *s_dict_key_type = NULL;
 
 /* Helper: format a "Dict does not contain key <key>" error message */
 static void dict_key_not_found_error(EastValue *key) {
-    char *printed = east_print_value(key, type_for_value(key));
+    char *printed = east_print_value(key, s_dict_key_type);
     char msg[512];
     snprintf(msg, sizeof(msg), "Dict does not contain key %s",
              printed ? printed : "?");
@@ -33,7 +24,7 @@ static void dict_key_not_found_error(EastValue *key) {
 
 /* Helper: format a "Dict already contains key <key>" error message */
 static void dict_key_already_exists_error(EastValue *key) {
-    char *printed = east_print_value(key, type_for_value(key));
+    char *printed = east_print_value(key, s_dict_key_type);
     char msg[512];
     snprintf(msg, sizeof(msg), "Dict already contains key %s",
              printed ? printed : "?");
@@ -54,6 +45,13 @@ static EastValue *call_fn(EastValue *fn, EastValue **call_args, size_t nargs) {
     eval_result_free(&r);
     return NULL;
 }
+
+#define ITER_GUARD_DICT(d) do { \
+    if ((d)->iter_lock > 0) { \
+        east_builtin_error("Cannot modify Dict during iteration"); \
+        return NULL; \
+    } \
+} while(0)
 
 /* --- implementations --- */
 
@@ -100,6 +98,7 @@ static EastValue *dict_try_get_impl(EastValue **args, size_t n) {
 
 static EastValue *dict_insert_impl(EastValue **args, size_t n) {
     (void)n;
+    ITER_GUARD_DICT(args[0]);
     if (east_dict_has(args[0], args[1])) {
         dict_key_already_exists_error(args[1]);
         return NULL;
@@ -110,6 +109,7 @@ static EastValue *dict_insert_impl(EastValue **args, size_t n) {
 
 static EastValue *dict_get_or_insert_impl(EastValue **args, size_t n) {
     (void)n;
+    ITER_GUARD_DICT(args[0]);
     if (east_dict_has(args[0], args[1])) {
         EastValue *v = east_dict_get(args[0], args[1]);
         if (v) east_value_retain(v);
@@ -117,12 +117,14 @@ static EastValue *dict_get_or_insert_impl(EastValue **args, size_t n) {
     }
     EastValue *call_args[] = { args[1] };
     EastValue *val = call_fn(args[2], call_args, 1);
+    if (!val) return NULL;
     east_dict_set(args[0], args[1], val);
     return val;
 }
 
 static EastValue *dict_insert_or_update_impl(EastValue **args, size_t n) {
     (void)n;
+    ITER_GUARD_DICT(args[0]);
     EastValue *d = args[0];
     EastValue *key = args[1];
     EastValue *value = args[2];
@@ -131,6 +133,7 @@ static EastValue *dict_insert_or_update_impl(EastValue **args, size_t n) {
         EastValue *existing = east_dict_get(d, key);
         EastValue *margs[] = { existing, value, key };
         EastValue *merged = call_fn(merge_fn, margs, 3);
+        if (!merged) return NULL;
         east_dict_set(d, key, merged);
         east_value_release(merged);
     } else {
@@ -163,6 +166,7 @@ static EastValue *dict_swap_impl(EastValue **args, size_t n) {
 
 static EastValue *dict_merge_impl(EastValue **args, size_t n) {
     (void)n;
+    ITER_GUARD_DICT(args[0]);
     /* args: d, key, value, merge_fn, initial_fn */
     EastValue *d = args[0];
     EastValue *key = args[1];
@@ -190,6 +194,7 @@ static EastValue *dict_merge_impl(EastValue **args, size_t n) {
 
 static EastValue *dict_delete_impl(EastValue **args, size_t n) {
     (void)n;
+    ITER_GUARD_DICT(args[0]);
     EastValue *d = args[0];
     EastValue *key = args[1];
     if (east_dict_delete(d, key))
@@ -200,6 +205,7 @@ static EastValue *dict_delete_impl(EastValue **args, size_t n) {
 
 static EastValue *dict_try_delete_impl(EastValue **args, size_t n) {
     (void)n;
+    ITER_GUARD_DICT(args[0]);
     EastValue *d = args[0];
     EastValue *key = args[1];
     return east_boolean(east_dict_delete(d, key));
@@ -207,6 +213,7 @@ static EastValue *dict_try_delete_impl(EastValue **args, size_t n) {
 
 static EastValue *dict_pop_impl(EastValue **args, size_t n) {
     (void)n;
+    ITER_GUARD_DICT(args[0]);
     EastValue *d = args[0];
     EastValue *key = args[1];
     EastValue *val = east_dict_pop(d, key);
@@ -217,6 +224,7 @@ static EastValue *dict_pop_impl(EastValue **args, size_t n) {
 
 static EastValue *dict_clear_impl(EastValue **args, size_t n) {
     (void)n;
+    ITER_GUARD_DICT(args[0]);
     EastValue *d = args[0];
     for (size_t i = 0; i < d->data.dict.len; i++) {
         east_value_release(d->data.dict.keys[i]);
@@ -228,6 +236,7 @@ static EastValue *dict_clear_impl(EastValue **args, size_t n) {
 
 static EastValue *dict_union_in_place_impl(EastValue **args, size_t n) {
     (void)n;
+    ITER_GUARD_DICT(args[0]);
     EastValue *d = args[0];
     EastValue *other = args[1];
     EastValue *merge_fn = args[2];
@@ -250,6 +259,7 @@ static EastValue *dict_union_in_place_impl(EastValue **args, size_t n) {
 
 static EastValue *dict_merge_all_impl(EastValue **args, size_t n) {
     (void)n;
+    ITER_GUARD_DICT(args[0]);
     EastValue *d = args[0];
     EastValue *other = args[1];
     EastValue *merge_fn = args[2];
@@ -299,6 +309,7 @@ static EastValue *dict_get_keys_impl(EastValue **args, size_t n) {
         } else {
             EastValue *dargs[] = { k };
             EastValue *def = call_fn(default_fn, dargs, 1);
+            if (!def) { east_value_release(result); return NULL; }
             east_dict_set(result, k, def);
             east_value_release(def);
         }
@@ -317,12 +328,15 @@ static EastValue *dict_generate_impl(EastValue **args, size_t n) {
         EastValue *idx = east_integer(i);
         EastValue *kargs[] = { idx };
         EastValue *key = call_fn(key_fn, kargs, 1);
+        if (!key) { east_value_release(idx); east_value_release(result); return NULL; }
         EastValue *vargs[] = { idx };
         EastValue *val = call_fn(value_fn, vargs, 1);
+        if (!val) { east_value_release(key); east_value_release(idx); east_value_release(result); return NULL; }
         if (east_dict_has(result, key)) {
             EastValue *existing = east_dict_get(result, key);
             EastValue *margs[] = { existing, val, key };
             EastValue *merged = call_fn(merge_fn, margs, 3);
+            if (!merged) { east_value_release(key); east_value_release(val); east_value_release(idx); east_value_release(result); return NULL; }
             east_dict_set(result, key, merged);
             east_value_release(merged);
         } else {
@@ -348,11 +362,17 @@ static EastValue *dict_for_each_impl(EastValue **args, size_t n) {
     (void)n;
     EastValue *d = args[0];
     EastValue *fn = args[1];
+    d->iter_lock++;
     for (size_t i = 0; i < d->data.dict.len; i++) {
         EastValue *call_args[] = { d->data.dict.values[i], d->data.dict.keys[i] };
         EastValue *ret = call_fn(fn, call_args, 2);
+        if (!ret) {
+            d->iter_lock--;
+            return NULL;
+        }
         east_value_release(ret);
     }
+    d->iter_lock--;
     return east_null();
 }
 
@@ -364,6 +384,7 @@ static EastValue *dict_map_impl(EastValue **args, size_t n) {
     for (size_t i = 0; i < d->data.dict.len; i++) {
         EastValue *call_args[] = { d->data.dict.values[i], d->data.dict.keys[i] };
         EastValue *val = call_fn(fn, call_args, 2);
+        if (!val) { east_value_release(result); return NULL; }
         east_dict_set(result, d->data.dict.keys[i], val);
         east_value_release(val);
     }
@@ -378,6 +399,7 @@ static EastValue *dict_filter_impl(EastValue **args, size_t n) {
     for (size_t i = 0; i < d->data.dict.len; i++) {
         EastValue *call_args[] = { d->data.dict.values[i], d->data.dict.keys[i] };
         EastValue *pred = call_fn(fn, call_args, 2);
+        if (!pred) { east_value_release(result); return NULL; }
         if (pred->data.boolean)
             east_dict_set(result, d->data.dict.keys[i], d->data.dict.values[i]);
         east_value_release(pred);
@@ -393,6 +415,7 @@ static EastValue *dict_filter_map_impl(EastValue **args, size_t n) {
     for (size_t i = 0; i < d->data.dict.len; i++) {
         EastValue *call_args[] = { d->data.dict.values[i], d->data.dict.keys[i] };
         EastValue *opt = call_fn(fn, call_args, 2);
+        if (!opt) { east_value_release(result); return NULL; }
         if (opt->kind == EAST_VAL_VARIANT && strcmp(opt->data.variant.case_name, "some") == 0)
             east_dict_set(result, d->data.dict.keys[i], opt->data.variant.value);
         east_value_release(opt);
@@ -407,6 +430,7 @@ static EastValue *dict_first_map_impl(EastValue **args, size_t n) {
     for (size_t i = 0; i < d->data.dict.len; i++) {
         EastValue *call_args[] = { d->data.dict.values[i], d->data.dict.keys[i] };
         EastValue *opt = call_fn(fn, call_args, 2);
+        if (!opt) return NULL;
         if (opt->kind == EAST_VAL_VARIANT && strcmp(opt->data.variant.case_name, "some") == 0)
             return opt;
         east_value_release(opt);
@@ -425,13 +449,16 @@ static EastValue *dict_map_reduce_impl(EastValue **args, size_t n) {
     }
     EastValue *margs0[] = { d->data.dict.values[0], d->data.dict.keys[0] };
     EastValue *acc = call_fn(map_fn, margs0, 2);
+    if (!acc) return NULL;
     for (size_t i = 1; i < d->data.dict.len; i++) {
         EastValue *margs[] = { d->data.dict.values[i], d->data.dict.keys[i] };
         EastValue *mapped = call_fn(map_fn, margs, 2);
+        if (!mapped) { east_value_release(acc); return NULL; }
         EastValue *rargs[] = { acc, mapped };
         EastValue *new_acc = call_fn(reduce_fn, rargs, 2);
         east_value_release(acc);
         east_value_release(mapped);
+        if (!new_acc) return NULL;
         acc = new_acc;
     }
     return acc;
@@ -448,6 +475,7 @@ static EastValue *dict_reduce_impl(EastValue **args, size_t n) {
         EastValue *call_args[] = { acc, d->data.dict.values[i], d->data.dict.keys[i] };
         EastValue *new_acc = call_fn(fn, call_args, 3);
         east_value_release(acc);
+        if (!new_acc) return NULL;
         acc = new_acc;
     }
     return acc;
@@ -461,6 +489,7 @@ static EastValue *dict_to_array_impl(EastValue **args, size_t n) {
     for (size_t i = 0; i < d->data.dict.len; i++) {
         EastValue *call_args[] = { d->data.dict.values[i], d->data.dict.keys[i] };
         EastValue *val = call_fn(fn, call_args, 2);
+        if (!val) { east_value_release(result); return NULL; }
         east_array_push(result, val);
         east_value_release(val);
     }
@@ -475,6 +504,7 @@ static EastValue *dict_to_set_impl(EastValue **args, size_t n) {
     for (size_t i = 0; i < d->data.dict.len; i++) {
         EastValue *call_args[] = { d->data.dict.values[i], d->data.dict.keys[i] };
         EastValue *val = call_fn(fn, call_args, 2);
+        if (!val) { east_value_release(result); return NULL; }
         east_set_insert(result, val);
         east_value_release(val);
     }
@@ -493,12 +523,15 @@ static EastValue *dict_to_dict_impl(EastValue **args, size_t n) {
         EastValue *k = d->data.dict.keys[i];
         EastValue *kargs[] = { v, k };
         EastValue *new_key = call_fn(key_fn, kargs, 2);
+        if (!new_key) { east_value_release(result); return NULL; }
         EastValue *vargs[] = { v, k };
         EastValue *new_val = call_fn(value_fn, vargs, 2);
+        if (!new_val) { east_value_release(new_key); east_value_release(result); return NULL; }
         if (east_dict_has(result, new_key)) {
             EastValue *existing = east_dict_get(result, new_key);
             EastValue *margs[] = { existing, new_val, new_key };
             EastValue *merged = call_fn(merge_fn, margs, 3);
+            if (!merged) { east_value_release(new_key); east_value_release(new_val); east_value_release(result); return NULL; }
             east_dict_set(result, new_key, merged);
             east_value_release(merged);
         } else {
@@ -518,6 +551,7 @@ static EastValue *dict_flatten_to_array_impl(EastValue **args, size_t n) {
     for (size_t i = 0; i < d->data.dict.len; i++) {
         EastValue *call_args[] = { d->data.dict.values[i], d->data.dict.keys[i] };
         EastValue *mapped = call_fn(fn, call_args, 2);
+        if (!mapped) { east_value_release(result); return NULL; }
         if (mapped->kind == EAST_VAL_ARRAY) {
             for (size_t j = 0; j < east_array_len(mapped); j++)
                 east_array_push(result, east_array_get(mapped, j));
@@ -535,6 +569,7 @@ static EastValue *dict_flatten_to_set_impl(EastValue **args, size_t n) {
     for (size_t i = 0; i < d->data.dict.len; i++) {
         EastValue *call_args[] = { d->data.dict.values[i], d->data.dict.keys[i] };
         EastValue *mapped = call_fn(fn, call_args, 2);
+        if (!mapped) { east_value_release(result); return NULL; }
         if (mapped->kind == EAST_VAL_SET) {
             for (size_t j = 0; j < mapped->data.set.len; j++)
                 east_set_insert(result, mapped->data.set.items[j]);
@@ -553,6 +588,7 @@ static EastValue *dict_flatten_to_dict_impl(EastValue **args, size_t n) {
     for (size_t i = 0; i < d->data.dict.len; i++) {
         EastValue *call_args[] = { d->data.dict.values[i], d->data.dict.keys[i] };
         EastValue *mapped = call_fn(fn, call_args, 2);
+        if (!mapped) { east_value_release(result); return NULL; }
         if (mapped->kind == EAST_VAL_DICT) {
             for (size_t j = 0; j < mapped->data.dict.len; j++) {
                 EastValue *mk = mapped->data.dict.keys[j];
@@ -561,6 +597,7 @@ static EastValue *dict_flatten_to_dict_impl(EastValue **args, size_t n) {
                     EastValue *existing = east_dict_get(result, mk);
                     EastValue *margs[] = { existing, mv, mk };
                     EastValue *merged = call_fn(merge_fn, margs, 3);
+                    if (!merged) { east_value_release(mapped); east_value_release(result); return NULL; }
                     east_dict_set(result, mk, merged);
                     east_value_release(merged);
                 } else {
@@ -585,15 +622,18 @@ static EastValue *dict_group_fold_impl(EastValue **args, size_t n) {
         EastValue *k = d->data.dict.keys[i];
         EastValue *kargs[] = { v, k };
         EastValue *group_key = call_fn(key_fn, kargs, 2);
+        if (!group_key) { east_value_release(result); return NULL; }
         if (!east_dict_has(result, group_key)) {
             EastValue *iargs[] = { group_key };
             EastValue *init = call_fn(init_fn, iargs, 1);
+            if (!init) { east_value_release(group_key); east_value_release(result); return NULL; }
             east_dict_set(result, group_key, init);
             east_value_release(init);
         }
         EastValue *acc = east_dict_get(result, group_key);
         EastValue *fargs[] = { acc, v, k };
         EastValue *new_acc = call_fn(fold_fn, fargs, 3);
+        if (!new_acc) { east_value_release(group_key); east_value_release(result); return NULL; }
         east_dict_set(result, group_key, new_acc);
         east_value_release(new_acc);
         east_value_release(group_key);
@@ -606,18 +646,25 @@ static EastValue *dict_group_fold_impl(EastValue **args, size_t n) {
 static BuiltinImpl dict_generate_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_generate_impl; }
 static BuiltinImpl dict_size_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_size_impl; }
 static BuiltinImpl dict_has_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_has_impl; }
-static BuiltinImpl dict_get_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_get_impl; }
+/* Factories that need key type for error messages capture tp[0] (K) */
+#define DICT_KEY_FACTORY(name, impl) \
+    static BuiltinImpl name(EastType **tp, size_t ntp) { \
+        if (ntp > 0 && tp[0]) s_dict_key_type = tp[0]; \
+        return impl; \
+    }
+DICT_KEY_FACTORY(dict_get_factory, dict_get_impl)
+DICT_KEY_FACTORY(dict_insert_factory, dict_insert_impl)
+DICT_KEY_FACTORY(dict_update_factory, dict_update_impl)
+DICT_KEY_FACTORY(dict_swap_factory, dict_swap_impl)
+DICT_KEY_FACTORY(dict_delete_factory, dict_delete_impl)
+DICT_KEY_FACTORY(dict_pop_factory, dict_pop_impl)
+#undef DICT_KEY_FACTORY
 static BuiltinImpl dict_get_or_default_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_get_or_default_impl; }
 static BuiltinImpl dict_try_get_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_try_get_impl; }
-static BuiltinImpl dict_insert_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_insert_impl; }
 static BuiltinImpl dict_get_or_insert_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_get_or_insert_impl; }
 static BuiltinImpl dict_insert_or_update_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_insert_or_update_impl; }
-static BuiltinImpl dict_update_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_update_impl; }
-static BuiltinImpl dict_swap_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_swap_impl; }
 static BuiltinImpl dict_merge_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_merge_impl; }
-static BuiltinImpl dict_delete_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_delete_impl; }
 static BuiltinImpl dict_try_delete_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_try_delete_impl; }
-static BuiltinImpl dict_pop_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_pop_impl; }
 static BuiltinImpl dict_clear_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_clear_impl; }
 static BuiltinImpl dict_union_in_place_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_union_in_place_impl; }
 static BuiltinImpl dict_merge_all_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_merge_all_impl; }

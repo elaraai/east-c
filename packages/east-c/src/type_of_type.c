@@ -314,28 +314,64 @@ void east_type_of_type_init(void)
 /*  east_type_from_value_ctx                                           */
 /*                                                                     */
 /*  Internal helper: converts a decoded EastTypeType variant value to  */
-/*  EastType*, tracking recursive wrappers in a stack so that          */
-/*  Recursive(depth) self-references resolve correctly.                */
+/*  EastType*, tracking compound type depth and speculative recursive  */
+/*  wrappers so that Recursive(N) self-references resolve correctly.   */
+/*                                                                     */
+/*  Mirrors the TypeScript toEastTypeValue encoder:                    */
+/*  - Each compound type (Array, Set, Dict, Struct, Variant, Function, */
+/*    etc.) pushes onto a depth stack before recursing into children.   */
+/*  - Recursive(N) means "self-reference to the compound type at       */
+/*    position depth - N in the stack".                                 */
+/*  - A speculative recursive wrapper is created at each depth.  If    */
+/*    any Recursive(N) targets it, the wrapper is wired up; otherwise  */
+/*    it is discarded.                                                  */
 /* ================================================================== */
 
 typedef struct {
-    EastType **items;
-    int len;
-    int cap;
-} RecStack;
+    EastType **wrappers;  /* Speculative recursive wrappers indexed by depth */
+    int depth;            /* Current compound type nesting depth */
+    int cap;              /* Capacity of wrappers array */
+} RecCtx;
 
-static void rec_stack_push(RecStack *s, EastType *t) {
-    if (s->len >= s->cap) {
-        int new_cap = s->cap ? s->cap * 2 : 4;
-        EastType **new_items = realloc(s->items, new_cap * sizeof(EastType *));
-        if (!new_items) return;
-        s->items = new_items;
-        s->cap = new_cap;
+static void rec_ctx_push(RecCtx *ctx) {
+    if (ctx->depth >= ctx->cap) {
+        int new_cap = ctx->cap ? ctx->cap * 2 : 16;
+        EastType **nw = realloc(ctx->wrappers, (size_t)new_cap * sizeof(EastType *));
+        if (!nw) return;
+        for (int i = ctx->cap; i < new_cap; i++) nw[i] = NULL;
+        ctx->wrappers = nw;
+        ctx->cap = new_cap;
     }
-    s->items[s->len++] = t;
+    ctx->wrappers[ctx->depth] = east_recursive_type_new();
+    ctx->depth++;
 }
 
-static EastType *east_type_from_value_ctx(EastValue *v, RecStack *rec_stack)
+/* Pop depth and check if the wrapper at this position was referenced.
+ * If yes, wire it up as a recursive type wrapping `inner`.
+ * If no, discard the unused wrapper and return `inner` directly. */
+static EastType *rec_ctx_pop(RecCtx *ctx, EastType *inner) {
+    ctx->depth--;
+    EastType *wrapper = ctx->wrappers[ctx->depth];
+    ctx->wrappers[ctx->depth] = NULL;
+
+    if (!inner) {
+        if (wrapper) east_type_release(wrapper);
+        return NULL;
+    }
+
+    if (wrapper && wrapper->ref_count > 1) {
+        /* Self-references were found — this IS a recursive type. */
+        east_recursive_type_set(wrapper, inner);
+        east_recursive_type_finalize(wrapper);
+        return wrapper;
+    } else {
+        /* No self-references — discard the unused wrapper. */
+        if (wrapper) east_type_release(wrapper);
+        return inner;
+    }
+}
+
+static EastType *east_type_from_value_ctx(EastValue *v, RecCtx *ctx)
 {
     if (!v || v->kind != EAST_VAL_VARIANT) return NULL;
 
@@ -354,57 +390,68 @@ static EastType *east_type_from_value_ctx(EastValue *v, RecStack *rec_stack)
 
     /* Container types with element: payload is the element type (variant) */
     if (strcmp(tag, "Array") == 0) {
-        EastType *elem = east_type_from_value_ctx(payload, rec_stack);
-        if (!elem) return NULL;
+        rec_ctx_push(ctx);
+        EastType *elem = east_type_from_value_ctx(payload, ctx);
+        if (!elem) return rec_ctx_pop(ctx, NULL);
         EastType *t = east_array_type(elem);
         if (elem->ref_count > 0) east_type_release(elem);
-        return t;
+        return rec_ctx_pop(ctx, t);
     }
     if (strcmp(tag, "Set") == 0) {
-        EastType *elem = east_type_from_value_ctx(payload, rec_stack);
-        if (!elem) return NULL;
+        rec_ctx_push(ctx);
+        EastType *elem = east_type_from_value_ctx(payload, ctx);
+        if (!elem) return rec_ctx_pop(ctx, NULL);
         EastType *t = east_set_type(elem);
         if (elem->ref_count > 0) east_type_release(elem);
-        return t;
+        return rec_ctx_pop(ctx, t);
     }
     if (strcmp(tag, "Ref") == 0) {
-        EastType *elem = east_type_from_value_ctx(payload, rec_stack);
-        if (!elem) return NULL;
+        rec_ctx_push(ctx);
+        EastType *elem = east_type_from_value_ctx(payload, ctx);
+        if (!elem) return rec_ctx_pop(ctx, NULL);
         EastType *t = east_ref_type(elem);
         if (elem->ref_count > 0) east_type_release(elem);
-        return t;
+        return rec_ctx_pop(ctx, t);
     }
     if (strcmp(tag, "Vector") == 0) {
-        EastType *elem = east_type_from_value_ctx(payload, rec_stack);
-        if (!elem) return NULL;
+        rec_ctx_push(ctx);
+        EastType *elem = east_type_from_value_ctx(payload, ctx);
+        if (!elem) return rec_ctx_pop(ctx, NULL);
         EastType *t = east_vector_type(elem);
         if (elem->ref_count > 0) east_type_release(elem);
-        return t;
+        return rec_ctx_pop(ctx, t);
     }
     if (strcmp(tag, "Matrix") == 0) {
-        EastType *elem = east_type_from_value_ctx(payload, rec_stack);
-        if (!elem) return NULL;
+        rec_ctx_push(ctx);
+        EastType *elem = east_type_from_value_ctx(payload, ctx);
+        if (!elem) return rec_ctx_pop(ctx, NULL);
         EastType *t = east_matrix_type(elem);
         if (elem->ref_count > 0) east_type_release(elem);
-        return t;
+        return rec_ctx_pop(ctx, t);
     }
 
     /* Dict: payload is struct {key: type, value: type} */
     if (strcmp(tag, "Dict") == 0) {
+        rec_ctx_push(ctx);
         EastValue *key_v = east_struct_get_field(payload, "key");
         EastValue *val_v = east_struct_get_field(payload, "value");
-        EastType *key = east_type_from_value_ctx(key_v, rec_stack);
-        EastType *val = east_type_from_value_ctx(val_v, rec_stack);
-        if (!key || !val) return NULL;
+        EastType *key = east_type_from_value_ctx(key_v, ctx);
+        EastType *val = east_type_from_value_ctx(val_v, ctx);
+        if (!key || !val) {
+            if (key) east_type_release(key);
+            if (val) east_type_release(val);
+            return rec_ctx_pop(ctx, NULL);
+        }
         EastType *t = east_dict_type(key, val);
         if (key->ref_count > 0) east_type_release(key);
         if (val->ref_count > 0) east_type_release(val);
-        return t;
+        return rec_ctx_pop(ctx, t);
     }
 
     /* Struct: payload is array of {name: String, type: type} */
     if (strcmp(tag, "Struct") == 0) {
         if (!payload || payload->kind != EAST_VAL_ARRAY) return NULL;
+        rec_ctx_push(ctx);
         size_t n = payload->data.array.len;
         const char **names = malloc(n * sizeof(char *));
         EastType **types = malloc(n * sizeof(EastType *));
@@ -413,7 +460,7 @@ static EastType *east_type_from_value_ctx(EastValue *v, RecStack *rec_stack)
             EastValue *name_v = east_struct_get_field(field, "name");
             EastValue *type_v = east_struct_get_field(field, "type");
             names[i] = name_v->data.string.data;
-            types[i] = east_type_from_value_ctx(type_v, rec_stack);
+            types[i] = east_type_from_value_ctx(type_v, ctx);
         }
         EastType *t = east_struct_type(names, types, n);
         for (size_t i = 0; i < n; i++) {
@@ -421,12 +468,13 @@ static EastType *east_type_from_value_ctx(EastValue *v, RecStack *rec_stack)
         }
         free(names);
         free(types);
-        return t;
+        return rec_ctx_pop(ctx, t);
     }
 
     /* Variant: payload is array of {name: String, type: type} */
     if (strcmp(tag, "Variant") == 0) {
         if (!payload || payload->kind != EAST_VAL_ARRAY) return NULL;
+        rec_ctx_push(ctx);
         size_t n = payload->data.array.len;
         const char **names = malloc(n * sizeof(char *));
         EastType **types = malloc(n * sizeof(EastType *));
@@ -435,7 +483,7 @@ static EastType *east_type_from_value_ctx(EastValue *v, RecStack *rec_stack)
             EastValue *name_v = east_struct_get_field(cas, "name");
             EastValue *type_v = east_struct_get_field(cas, "type");
             names[i] = name_v->data.string.data;
-            types[i] = east_type_from_value_ctx(type_v, rec_stack);
+            types[i] = east_type_from_value_ctx(type_v, ctx);
         }
         EastType *t = east_variant_type(names, types, n);
         for (size_t i = 0; i < n; i++) {
@@ -443,20 +491,20 @@ static EastType *east_type_from_value_ctx(EastValue *v, RecStack *rec_stack)
         }
         free(names);
         free(types);
-        return t;
+        return rec_ctx_pop(ctx, t);
     }
 
     /* Function / AsyncFunction: payload is struct {inputs: [type], output: type} */
     if (strcmp(tag, "Function") == 0 || strcmp(tag, "AsyncFunction") == 0) {
+        rec_ctx_push(ctx);
         EastValue *inputs_v = east_struct_get_field(payload, "inputs");
         EastValue *output_v = east_struct_get_field(payload, "output");
         size_t ni = inputs_v->data.array.len;
         EastType **inputs = malloc(ni * sizeof(EastType *));
         for (size_t i = 0; i < ni; i++) {
-            inputs[i] = east_type_from_value_ctx(inputs_v->data.array.items[i],
-                                                  rec_stack);
+            inputs[i] = east_type_from_value_ctx(inputs_v->data.array.items[i], ctx);
         }
-        EastType *output = east_type_from_value_ctx(output_v, rec_stack);
+        EastType *output = east_type_from_value_ctx(output_v, ctx);
         EastType *t;
         if (strcmp(tag, "AsyncFunction") == 0) {
             t = east_async_function_type(inputs, ni, output);
@@ -468,20 +516,20 @@ static EastType *east_type_from_value_ctx(EastValue *v, RecStack *rec_stack)
         }
         free(inputs);
         if (output && output->ref_count > 0) east_type_release(output);
-        return t;
+        return rec_ctx_pop(ctx, t);
     }
 
-    /* Recursive: payload is Integer (depth marker for self-reference).
-     * east_type_from_value only supports one level of recursion, so
-     * ALL self-references resolve to the single wrapper at rec_stack[0].
-     * The depth value varies with nesting but always targets the same
-     * outermost recursive wrapper. */
+    /* Recursive(N): self-reference to the compound type at depth - N.
+     * Resolve to the speculative wrapper at that position. */
     if (strcmp(tag, "Recursive") == 0) {
-        if (payload && payload->kind == EAST_VAL_INTEGER && rec_stack->len > 0) {
-            east_type_retain(rec_stack->items[0]);
-            return rec_stack->items[0];
+        if (payload && payload->kind == EAST_VAL_INTEGER) {
+            int target = ctx->depth - (int)payload->data.integer;
+            if (target >= 0 && target < ctx->depth && ctx->wrappers[target]) {
+                east_type_retain(ctx->wrappers[target]);
+                return ctx->wrappers[target];
+            }
         }
-        /* If no valid depth or no stack, create a disconnected wrapper */
+        /* Fallback: disconnected wrapper */
         return east_recursive_type_new();
     }
 
@@ -497,40 +545,10 @@ static EastType *east_type_from_value_ctx(EastValue *v, RecStack *rec_stack)
 
 EastType *east_type_from_value(EastValue *v)
 {
-    RecStack rec_stack = { .items = NULL, .len = 0, .cap = 0 };
-
-    /*
-     * Pre-create a Recursive wrapper and push it on the stack at depth 0.
-     * If the decoded type contains Recursive(N) self-references, they
-     * will resolve to this wrapper via the stack.  After decoding, if
-     * the wrapper was actually referenced (ref_count > 1), we know the
-     * type IS recursive and we wire it up.  Otherwise we discard the
-     * wrapper and return the decoded type directly.
-     */
-    EastType *wrapper = east_recursive_type_new();
-    rec_stack_push(&rec_stack, wrapper);
-
-    EastType *inner = east_type_from_value_ctx(v, &rec_stack);
-
-    free(rec_stack.items);
-
-    if (!inner) {
-        east_type_release(wrapper);
-        return NULL;
-    }
-
-    if (wrapper->ref_count > 1) {
-        /* Self-references were found — this IS a recursive type. */
-        east_recursive_type_set(wrapper, inner);
-        east_recursive_type_finalize(wrapper);
-        /* inner is owned by wrapper (not retained, to avoid cycle).
-         * finalize adjusts ref_count so only external refs are tracked. */
-        return wrapper;
-    } else {
-        /* No self-references — discard the unused wrapper. */
-        east_type_release(wrapper);
-        return inner;
-    }
+    RecCtx ctx = { .wrappers = NULL, .depth = 0, .cap = 0 };
+    EastType *result = east_type_from_value_ctx(v, &ctx);
+    free(ctx.wrappers);
+    return result;
 }
 
 /* ================================================================== */

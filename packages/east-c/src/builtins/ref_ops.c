@@ -12,8 +12,12 @@
 static EastValue *call_fn(EastValue *fn, EastValue **call_args, size_t nargs) {
     EvalResult r = east_call(fn->data.function.compiled, call_args, nargs);
     if (r.status == EVAL_OK || r.status == EVAL_RETURN) return r.value;
+    /* Propagate error from callback */
+    if (r.error_message) {
+        east_builtin_error(r.error_message);
+    }
     eval_result_free(&r);
-    return east_null();
+    return NULL;
 }
 
 /* --- implementations --- */
@@ -37,6 +41,7 @@ static EastValue *ref_merge_impl(EastValue **args, size_t n) {
     EastValue *current = east_ref_get(args[0]);
     EastValue *call_args[] = { current, args[1] };
     EastValue *merged = call_fn(args[2], call_args, 2);
+    if (!merged) return NULL;
     east_ref_set(args[0], merged);
     east_value_release(merged);
     return east_null();

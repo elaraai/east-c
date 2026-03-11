@@ -57,20 +57,37 @@ static EvalResult plat_describe(EastValue **args, size_t num_args)
         name = args[0]->data.string.data;
     }
 
-    printf("  %s\n", name);
+    printf("\xe2\x96\xb6 %s\n", name);
+
+    int failed_before = g_tests_failed;
+
+    struct timespec dt0, dt1;
+    clock_gettime(CLOCK_MONOTONIC, &dt0);
 
     /* Call the body function (second argument) */
     if (num_args > 1 && args[1] && args[1]->kind == EAST_VAL_FUNCTION) {
         EastCompiledFn *body = args[1]->data.function.compiled;
         EvalResult r = east_call(body, NULL, 0);
         if (r.status == EVAL_ERROR) {
-            fprintf(stderr, "    ERROR in describe \"%s\": %s\n",
+            g_tests_run++;
+            g_tests_failed++;
+            printf("  \xe2\x9c\x96 describe \"%s\": %s\n",
                     name, r.error_message ? r.error_message : "?");
             eval_result_free(&r);
-            return eval_error("describe body failed");
+        } else {
+            if (r.value) east_value_release(r.value);
+            eval_result_free(&r);
         }
-        if (r.value) east_value_release(r.value);
-        eval_result_free(&r);
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &dt1);
+    double desc_ms = (dt1.tv_sec - dt0.tv_sec) * 1000.0 +
+                     (dt1.tv_nsec - dt0.tv_nsec) / 1e6;
+
+    if (g_tests_failed > failed_before) {
+        printf("\xe2\x9c\x96 %s (%.6fms)\n", name, desc_ms);
+    } else {
+        printf("\xe2\x9c\x94 %s (%.6fms)\n", name, desc_ms);
     }
 
     return eval_ok(east_null());
@@ -87,29 +104,49 @@ static EvalResult plat_test(EastValue **args, size_t num_args)
 
     g_tests_run++;
 
+    struct timespec tt0, tt1;
+    clock_gettime(CLOCK_MONOTONIC, &tt0);
+
     /* Call the body function (second argument) */
+    int failed = 0;
+    const char *err_msg = NULL;
+    const char *err_file = NULL;
+    long err_line = 0, err_col = 0;
+
     if (num_args > 1 && args[1] && args[1]->kind == EAST_VAL_FUNCTION) {
         EastCompiledFn *body = args[1]->data.function.compiled;
         EvalResult r = east_call(body, NULL, 0);
         if (r.status == EVAL_ERROR) {
-            g_tests_failed++;
-            printf("    FAIL %s: %s\n", name,
-                   r.error_message ? r.error_message : "?");
+            failed = 1;
+            if (r.error_message) err_msg = strdup(r.error_message);
             if (r.locations && r.num_locations > 0) {
-                printf("      at %s:%ld:%ld\n",
-                       r.locations[0].filename ? r.locations[0].filename : "?",
-                       (long)r.locations[0].line,
-                       (long)r.locations[0].column);
+                if (r.locations[0].filename) err_file = strdup(r.locations[0].filename);
+                err_line = (long)r.locations[0].line;
+                err_col = (long)r.locations[0].column;
             }
-            eval_result_free(&r);
-            return eval_ok(east_null());
         }
         if (r.value) east_value_release(r.value);
         eval_result_free(&r);
     }
 
-    g_tests_passed++;
-    printf("    PASS %s\n", name);
+    clock_gettime(CLOCK_MONOTONIC, &tt1);
+    double test_ms = (tt1.tv_sec - tt0.tv_sec) * 1000.0 +
+                     (tt1.tv_nsec - tt0.tv_nsec) / 1e6;
+
+    if (failed) {
+        g_tests_failed++;
+        printf("  \xe2\x9c\x96 %s (%.6fms)\n", name, test_ms);
+        printf("    %s\n", err_msg ? err_msg : "?");
+        if (err_file) {
+            printf("    at %s:%ld:%ld\n", err_file, err_line, err_col);
+            free((void *)err_file);
+        }
+        free((void *)err_msg);
+    } else {
+        g_tests_passed++;
+        printf("  \xe2\x9c\x94 %s (%.6fms)\n", name, test_ms);
+    }
+
     return eval_ok(east_null());
 }
 
@@ -256,6 +293,7 @@ int main(int argc, char **argv)
         }
     }
 
+    printf("\xe2\x84\xb9 tests %d\n", g_tests_run);
     printf("\nResults: %d/%d passed", g_tests_passed, g_tests_run);
     if (g_tests_failed > 0) {
         printf(" (%d failed)", g_tests_failed);

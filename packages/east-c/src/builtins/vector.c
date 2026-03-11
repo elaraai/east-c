@@ -18,8 +18,12 @@
 static EastValue *call_fn(EastValue *fn, EastValue **call_args, size_t nargs) {
     EvalResult r = east_call(fn->data.function.compiled, call_args, nargs);
     if (r.status == EVAL_OK || r.status == EVAL_RETURN) return r.value;
+    /* Propagate error from callback */
+    if (r.error_message) {
+        east_builtin_error(r.error_message);
+    }
     eval_result_free(&r);
-    return east_null();
+    return NULL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -212,6 +216,7 @@ static EastValue *vector_map_with_type(EastValue **args, size_t n, EastType *out
         EastValue *idx = east_integer((int64_t)i);
         EastValue *call_args[] = { elem, idx };
         EastValue *mapped = call_fn(fn, call_args, 2);
+        if (!mapped) { east_value_release(elem); east_value_release(idx); east_value_release(result); return NULL; }
         vec_set_elem(result, i, mapped);
         east_value_release(elem);
         east_value_release(idx);
@@ -237,6 +242,7 @@ static EastValue *vector_fold_impl(EastValue **args, size_t n) {
         EastValue *idx = east_integer((int64_t)i);
         EastValue *call_args[] = { acc, elem, idx };
         EastValue *new_acc = call_fn(fn, call_args, 3);
+        if (!new_acc) { east_value_release(acc); east_value_release(elem); east_value_release(idx); return NULL; }
         east_value_release(acc);
         east_value_release(elem);
         east_value_release(idx);

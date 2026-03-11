@@ -81,12 +81,14 @@ for f in "$IR_DIR"/*.json; do
     fi
 done
 
-echo "========================================="
-echo "  East-C Compliance Test Results"
-echo "========================================="
+# Print detailed test output (▶, ✔, ✖, ℹ lines) from each file, sorted by name
+for f in "$IR_DIR"/*.json; do
+    name=$(basename "$f" .json)
+    outfile="$TMPDIR/$name.out"
+    [ -f "$outfile" ] && grep -E '^[▶✔✖ℹ]|^  [✔✖]' "$outfile"
+done
+
 echo ""
-echo -e "$SUMMARY" | sort
-echo ""
 echo "========================================="
-echo "  Total: $TOTAL_PASS passed, $TOTAL_FAIL failed, $TOTAL_CRASH crashed"
+printf "  Total: %d passed, %d failed, %d crashed\n" "$TOTAL_PASS" "$TOTAL_FAIL" "$TOTAL_CRASH"
 echo "========================================="

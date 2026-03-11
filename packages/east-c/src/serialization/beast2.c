@@ -972,5 +972,12 @@ EastValue *east_beast2_decode_full(const uint8_t *data, size_t len,
     beast2_dec_ctx_init(&dctx);
     EastValue *result = beast2_decode_value(data, len, &offset, type, &dctx);
     beast2_dec_ctx_free(&dctx);
+    if (!result) return NULL;
+
+    /* 4. Verify all bytes consumed — leftover bytes indicate a type mismatch */
+    if (offset != len) {
+        east_value_release(result);
+        return NULL;
+    }
     return result;
 }

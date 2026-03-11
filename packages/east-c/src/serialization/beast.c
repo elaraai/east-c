@@ -931,11 +931,12 @@ EastValue *east_beast_decode(const uint8_t *data, size_t len, EastType *type)
 
     size_t offset = 8;
 
-    /* 2. Skip type schema (decode to advance offset, then discard) */
+    /* 2. Decode type schema and verify it matches the expected type */
     EastType *decoded_type = beast_decode_type(data, len, &offset);
-    if (decoded_type) {
-        east_type_release(decoded_type);
-    }
+    if (!decoded_type) return NULL;
+    bool types_match = east_type_equal(decoded_type, type);
+    east_type_release(decoded_type);
+    if (!types_match) return NULL;
 
     /* 3. Decode value using the provided type */
     return beast_decode_value(data, len, &offset, type);
