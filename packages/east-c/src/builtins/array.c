@@ -15,14 +15,24 @@
 /* ------------------------------------------------------------------ */
 /* Helper: call a function value with given args                      */
 /* ------------------------------------------------------------------ */
+#define ITER_GUARD_ARRAY(arr) do { \
+    if ((arr)->iter_lock > 0) { \
+        east_builtin_error("Cannot modify Array during iteration"); \
+        return NULL; \
+    } \
+} while(0)
+
 static EastValue *call_fn(EastValue *fn, EastValue **call_args, size_t nargs) {
     EvalResult r = east_call(fn->data.function.compiled, call_args, nargs);
     if (r.status == EVAL_OK || r.status == EVAL_RETURN) {
         return r.value;
     }
-    /* Error -- free error details and return null */
+    /* Propagate error from callback */
+    if (r.error_message) {
+        east_builtin_error(r.error_message);
+    }
     eval_result_free(&r);
-    return east_null();
+    return NULL;
 }
 
 /* ================================================================== */
@@ -51,8 +61,8 @@ static EastValue *array_get_impl(EastValue **args, size_t n) {
     if (index < 0 || (size_t)index >= east_array_len(args[0])) {
         char msg[128];
         snprintf(msg, sizeof(msg),
-                 "Array index out of bounds: index %lld, length %zu",
-                 (long long)index, east_array_len(args[0]));
+                 "Array index %lld out of bounds",
+                 (long long)index);
         east_builtin_error(msg);
         return NULL;
     }
@@ -118,6 +128,7 @@ static EastValue *array_update_impl(EastValue **args, size_t n) {
 /* ================================================================== */
 static EastValue *array_push_last_impl(EastValue **args, size_t n) {
     (void)n;
+    ITER_GUARD_ARRAY(args[0]);
     east_array_push(args[0], args[1]);
     return east_null();
 }
@@ -128,6 +139,7 @@ static EastValue *array_push_last_impl(EastValue **args, size_t n) {
 static EastValue *array_pop_last_impl(EastValue **args, size_t n) {
     (void)n;
     EastValue *arr = args[0];
+    ITER_GUARD_ARRAY(arr);
     size_t len = east_array_len(arr);
     if (len == 0) {
         east_builtin_error("Cannot pop from empty Array");
@@ -146,6 +158,7 @@ static EastValue *array_pop_last_impl(EastValue **args, size_t n) {
 static EastValue *array_push_first_impl(EastValue **args, size_t n) {
     (void)n;
     EastValue *arr = args[0];
+    ITER_GUARD_ARRAY(arr);
     EastValue *val = args[1];
     size_t len = east_array_len(arr);
     /* Ensure capacity */
@@ -165,6 +178,7 @@ static EastValue *array_push_first_impl(EastValue **args, size_t n) {
 static EastValue *array_pop_first_impl(EastValue **args, size_t n) {
     (void)n;
     EastValue *arr = args[0];
+    ITER_GUARD_ARRAY(arr);
     size_t len = east_array_len(arr);
     if (len == 0) {
         east_builtin_error("Cannot pop from empty Array");
@@ -235,6 +249,7 @@ static EastValue *array_reverse_impl(EastValue **args, size_t n) {
 static EastValue *array_clear_impl(EastValue **args, size_t n) {
     (void)n;
     EastValue *arr = args[0];
+    ITER_GUARD_ARRAY(arr);
     /* Release all elements */
     for (size_t i = 0; i < east_array_len(arr); i++) {
         east_value_release(arr->data.array.items[i]);
@@ -261,6 +276,7 @@ static EastValue *array_copy_impl(EastValue **args, size_t n) {
 static EastValue *array_reverse_in_place_impl(EastValue **args, size_t n) {
     (void)n;
     EastValue *arr = args[0];
+    ITER_GUARD_ARRAY(arr);
     size_t len = east_array_len(arr);
     for (size_t i = 0; i < len / 2; i++) {
         EastValue *tmp = arr->data.array.items[i];
@@ -335,6 +351,7 @@ static EastValue *array_map_impl(EastValue **args, size_t n) {
         EastValue *idx = east_integer((int64_t)i);
         EastValue *call_args[] = { east_array_get(arr, i), idx };
         EastValue *mapped = call_fn(fn, call_args, 2);
+        if (!mapped) { east_value_release(idx); east_value_release(result); return NULL; }
         east_array_push(result, mapped);
         east_value_release(mapped);
         east_value_release(idx);
@@ -356,6 +373,7 @@ static EastValue *array_filter_impl(EastValue **args, size_t n) {
         EastValue *idx = east_integer((int64_t)i);
         EastValue *call_args[] = { item, idx };
         EastValue *pred = call_fn(fn, call_args, 2);
+        if (!pred) { east_value_release(idx); east_value_release(result); return NULL; }
         if (pred->data.boolean) {
             east_array_push(result, item);
         }
@@ -379,6 +397,7 @@ static EastValue *array_fold_impl(EastValue **args, size_t n) {
         EastValue *idx = east_integer((int64_t)i);
         EastValue *call_args[] = { acc, east_array_get(arr, i), idx };
         EastValue *new_acc = call_fn(fn, call_args, 3);
+        if (!new_acc) { east_value_release(acc); east_value_release(idx); return NULL; }
         east_value_release(acc);
         acc = new_acc;
         east_value_retain(acc);
@@ -401,6 +420,7 @@ static EastValue *array_generate_impl(EastValue **args, size_t n) {
         EastValue *idx = east_integer(i);
         EastValue *call_args[] = { idx };
         EastValue *val = call_fn(fn, call_args, 1);
+        if (!val) { east_value_release(idx); east_value_release(result); return NULL; }
         east_array_push(result, val);
         east_value_release(val);
         east_value_release(idx);
@@ -446,6 +466,10 @@ static EastValue *array_sort_impl(EastValue **args, size_t n) {
         indices[i] = i;
         EastValue *call_args[] = { east_array_get(arr, i) };
         keys[i] = call_fn(key_fn, call_args, 1);
+        if (!keys[i]) {
+            for (size_t j = 0; j < i; j++) east_value_release(keys[j]);
+            free(keys); free(indices); return NULL;
+        }
     }
 
     SortCtx ctx = { .keys = keys };
@@ -469,6 +493,7 @@ static EastValue *array_sort_impl(EastValue **args, size_t n) {
 static EastValue *array_sort_in_place_impl(EastValue **args, size_t n) {
     (void)n;
     EastValue *arr = args[0];
+    ITER_GUARD_ARRAY(arr);
     EastValue *key_fn = args[1];
     size_t len = east_array_len(arr);
     if (len <= 1) return east_null();
@@ -479,6 +504,10 @@ static EastValue *array_sort_in_place_impl(EastValue **args, size_t n) {
         indices[i] = i;
         EastValue *call_args[] = { east_array_get(arr, i) };
         keys[i] = call_fn(key_fn, call_args, 1);
+        if (!keys[i]) {
+            for (size_t j = 0; j < i; j++) east_value_release(keys[j]);
+            free(keys); free(indices); return NULL;
+        }
     }
 
     SortCtx ctx = { .keys = keys };
@@ -513,10 +542,12 @@ static EastValue *array_is_sorted_impl(EastValue **args, size_t n) {
     {
         EastValue *call_args[] = { east_array_get(arr, 0) };
         prev_key = call_fn(key_fn, call_args, 1);
+        if (!prev_key) return NULL;
     }
     for (size_t i = 1; i < len; i++) {
         EastValue *call_args[] = { east_array_get(arr, i) };
         EastValue *key = call_fn(key_fn, call_args, 1);
+        if (!key) { east_value_release(prev_key); return NULL; }
         if (east_value_compare(prev_key, key) > 0) {
             east_value_release(prev_key);
             east_value_release(key);
@@ -542,6 +573,7 @@ static EastValue *array_find_sorted_first_impl(EastValue **args, size_t n) {
         size_t mid = (left + right) / 2;
         EastValue *call_args[] = { east_array_get(arr, mid) };
         EastValue *key = call_fn(key_fn, call_args, 1);
+        if (!key) return NULL;
         if (east_value_compare(key, target) < 0) {
             left = mid + 1;
         } else {
@@ -565,6 +597,7 @@ static EastValue *array_find_sorted_last_impl(EastValue **args, size_t n) {
         size_t mid = (left + right) / 2;
         EastValue *call_args[] = { east_array_get(arr, mid) };
         EastValue *key = call_fn(key_fn, call_args, 1);
+        if (!key) return NULL;
         if (east_value_compare(key, target) <= 0) {
             left = mid + 1;
         } else {
@@ -601,6 +634,7 @@ static EastValue *array_find_first_impl(EastValue **args, size_t n) {
     for (size_t i = 0; i < len; i++) {
         EastValue *call_args[] = { east_array_get(arr, i) };
         EastValue *key = call_fn(key_fn, call_args, 1);
+        if (!key) return NULL;
         if (east_value_compare(key, target) == 0) {
             east_value_release(key);
             return east_variant_new("some", east_integer((int64_t)i), NULL);
@@ -628,6 +662,7 @@ static EastValue *array_get_keys_impl(EastValue **args, size_t n) {
         } else {
             EastValue *call_args[] = { east_integer(index) };
             EastValue *def = call_fn(default_fn, call_args, 1);
+            if (!def) { east_value_release(call_args[0]); east_value_release(result); return NULL; }
             east_array_push(result, def);
             east_value_release(def);
             east_value_release(call_args[0]);
@@ -644,13 +679,21 @@ static EastValue *array_for_each_impl(EastValue **args, size_t n) {
     EastValue *arr = args[0];
     EastValue *fn = args[1];
     size_t len = east_array_len(arr);
+    arr->iter_lock++;
     for (size_t i = 0; i < len; i++) {
         EastValue *idx = east_integer((int64_t)i);
         EastValue *call_args[] = { east_array_get(arr, i), idx };
-        EastValue *ret = call_fn(fn, call_args, 2);
-        east_value_release(ret);
+        EvalResult r = east_call(fn->data.function.compiled, call_args, 2);
         east_value_release(idx);
+        if (r.status != EVAL_OK && r.status != EVAL_RETURN) {
+            arr->iter_lock--;
+            if (r.error_message) east_builtin_error(r.error_message);
+            eval_result_free(&r);
+            return NULL;
+        }
+        if (r.value) east_value_release(r.value);
     }
+    arr->iter_lock--;
     return east_null();
 }
 
@@ -667,6 +710,7 @@ static EastValue *array_filter_map_impl(EastValue **args, size_t n) {
         EastValue *idx = east_integer((int64_t)i);
         EastValue *call_args[] = { east_array_get(arr, i), idx };
         EastValue *opt = call_fn(fn, call_args, 2);
+        if (!opt) { east_value_release(idx); east_value_release(result); return NULL; }
         /* Check if variant is "some" */
         if (opt->kind == EAST_VAL_VARIANT && strcmp(opt->data.variant.case_name, "some") == 0) {
             east_array_push(result, opt->data.variant.value);
@@ -689,6 +733,7 @@ static EastValue *array_first_map_impl(EastValue **args, size_t n) {
         EastValue *idx = east_integer((int64_t)i);
         EastValue *call_args[] = { east_array_get(arr, i), idx };
         EastValue *opt = call_fn(fn, call_args, 2);
+        if (!opt) { east_value_release(idx); return NULL; }
         east_value_release(idx);
         if (opt->kind == EAST_VAL_VARIANT && strcmp(opt->data.variant.case_name, "some") == 0) {
             return opt;
@@ -717,17 +762,20 @@ static EastValue *array_map_reduce_impl(EastValue **args, size_t n) {
     EastValue *map_args0[] = { east_array_get(arr, 0), idx0 };
     EastValue *acc = call_fn(map_fn, map_args0, 2);
     east_value_release(idx0);
+    if (!acc) return NULL;
 
     for (size_t i = 1; i < len; i++) {
         EastValue *idx = east_integer((int64_t)i);
         EastValue *map_args[] = { east_array_get(arr, i), idx };
         EastValue *mapped = call_fn(map_fn, map_args, 2);
         east_value_release(idx);
+        if (!mapped) { east_value_release(acc); return NULL; }
 
         EastValue *reduce_args[] = { acc, mapped };
         EastValue *new_acc = call_fn(reduce_fn, reduce_args, 2);
         east_value_release(acc);
         east_value_release(mapped);
+        if (!new_acc) return NULL;
         acc = new_acc;
     }
     return acc;
@@ -755,6 +803,7 @@ static EastValue *array_merge_impl(EastValue **args, size_t n) {
     EastValue *idx = east_integer(index);
     EastValue *call_args[] = { old, value, idx };
     EastValue *merged = call_fn(fn, call_args, 3);
+    if (!merged) { east_value_release(idx); return NULL; }
     /* call_fn returns owned; store directly in slot (transfers ownership) */
     EastValue *prev = arr->data.array.items[(size_t)index];
     arr->data.array.items[(size_t)index] = merged;
@@ -769,6 +818,7 @@ static EastValue *array_merge_impl(EastValue **args, size_t n) {
 static EastValue *array_append_impl(EastValue **args, size_t n) {
     (void)n;
     EastValue *arr = args[0];
+    ITER_GUARD_ARRAY(arr);
     EastValue *other = args[1];
     for (size_t i = 0; i < east_array_len(other); i++)
         east_array_push(arr, east_array_get(other, i));
@@ -781,6 +831,7 @@ static EastValue *array_append_impl(EastValue **args, size_t n) {
 static EastValue *array_prepend_impl(EastValue **args, size_t n) {
     (void)n;
     EastValue *arr = args[0];
+    ITER_GUARD_ARRAY(arr);
     EastValue *other = args[1];
     size_t other_len = east_array_len(other);
     /* Insert each element of other at position i */
@@ -812,6 +863,7 @@ static EastValue *array_merge_all_impl(EastValue **args, size_t n) {
         EastValue *idx = east_integer((int64_t)i);
         EastValue *call_args[] = { east_array_get(arr, i), east_array_get(other, i), idx };
         EastValue *merged = call_fn(fn, call_args, 3);
+        if (!merged) { east_value_release(idx); return NULL; }
         /* call_fn returns owned; store directly in slot (transfers ownership) */
         EastValue *prev = arr->data.array.items[i];
         arr->data.array.items[i] = merged;
@@ -866,6 +918,7 @@ static EastValue *array_to_set_impl(EastValue **args, size_t n) {
         EastValue *idx = east_integer((int64_t)i);
         EastValue *call_args[] = { east_array_get(arr, i), idx };
         EastValue *key = call_fn(key_fn, call_args, 2);
+        if (!key) { east_value_release(idx); east_value_release(result); return NULL; }
         east_set_insert(result, key);
         east_value_release(key);
         east_value_release(idx);
@@ -888,12 +941,15 @@ static EastValue *array_to_dict_impl(EastValue **args, size_t n) {
         EastValue *idx = east_integer((int64_t)i);
         EastValue *kargs[] = { east_array_get(arr, i), idx };
         EastValue *key = call_fn(key_fn, kargs, 2);
+        if (!key) { east_value_release(idx); east_value_release(result); return NULL; }
         EastValue *vargs[] = { east_array_get(arr, i), idx };
         EastValue *val = call_fn(value_fn, vargs, 2);
+        if (!val) { east_value_release(key); east_value_release(idx); east_value_release(result); return NULL; }
         if (east_dict_has(result, key)) {
             EastValue *existing = east_dict_get(result, key);
             EastValue *margs[] = { existing, val, key };
             EastValue *merged = call_fn(merge_fn, margs, 3);
+            if (!merged) { east_value_release(key); east_value_release(val); east_value_release(idx); east_value_release(result); return NULL; }
             east_dict_set(result, key, merged);
             east_value_release(merged);
         } else {
@@ -919,6 +975,7 @@ static EastValue *array_flatten_to_array_impl(EastValue **args, size_t n) {
         EastValue *idx = east_integer((int64_t)i);
         EastValue *call_args[] = { east_array_get(arr, i), idx };
         EastValue *mapped = call_fn(fn, call_args, 2);
+        if (!mapped) { east_value_release(idx); east_value_release(result); return NULL; }
         /* mapped should be an array -- flatten it */
         for (size_t j = 0; j < east_array_len(mapped); j++)
             east_array_push(result, east_array_get(mapped, j));
@@ -941,6 +998,7 @@ static EastValue *array_flatten_to_set_impl(EastValue **args, size_t n) {
         EastValue *idx = east_integer((int64_t)i);
         EastValue *call_args[] = { east_array_get(arr, i), idx };
         EastValue *mapped = call_fn(fn, call_args, 2);
+        if (!mapped) { east_value_release(idx); east_value_release(result); return NULL; }
         /* mapped is a set -- iterate and insert */
         if (mapped->kind == EAST_VAL_SET) {
             for (size_t j = 0; j < mapped->data.set.len; j++)
@@ -966,6 +1024,7 @@ static EastValue *array_flatten_to_dict_impl(EastValue **args, size_t n) {
         EastValue *idx = east_integer((int64_t)i);
         EastValue *call_args[] = { east_array_get(arr, i), idx };
         EastValue *mapped = call_fn(fn, call_args, 2);
+        if (!mapped) { east_value_release(idx); east_value_release(result); return NULL; }
         /* mapped is a dict -- merge each key/value */
         if (mapped->kind == EAST_VAL_DICT) {
             for (size_t j = 0; j < mapped->data.dict.len; j++) {
@@ -975,6 +1034,7 @@ static EastValue *array_flatten_to_dict_impl(EastValue **args, size_t n) {
                     EastValue *existing = east_dict_get(result, k);
                     EastValue *margs[] = { existing, v, k };
                     EastValue *merged = call_fn(merge_fn, margs, 3);
+                    if (!merged) { east_value_release(mapped); east_value_release(idx); east_value_release(result); return NULL; }
                     east_dict_set(result, k, merged);
                     east_value_release(merged);
                 } else {
@@ -1003,10 +1063,12 @@ static EastValue *array_group_fold_impl(EastValue **args, size_t n) {
         EastValue *idx = east_integer((int64_t)i);
         EastValue *kargs[] = { east_array_get(arr, i), idx };
         EastValue *key = call_fn(key_fn, kargs, 2);
+        if (!key) { east_value_release(idx); east_value_release(result); return NULL; }
         EastValue *acc;
         if (!east_dict_has(result, key)) {
             EastValue *iargs[] = { key };
             acc = call_fn(init_fn, iargs, 1);
+            if (!acc) { east_value_release(key); east_value_release(idx); east_value_release(result); return NULL; }
             east_dict_set(result, key, acc);
             east_value_release(acc);
         } else {
@@ -1014,6 +1076,7 @@ static EastValue *array_group_fold_impl(EastValue **args, size_t n) {
         }
         EastValue *fargs[] = { acc, east_array_get(arr, i), idx };
         EastValue *new_acc = call_fn(fold_fn, fargs, 3);
+        if (!new_acc) { east_value_release(key); east_value_release(idx); east_value_release(result); return NULL; }
         east_dict_set(result, key, new_acc);
         east_value_release(new_acc);
         east_value_release(key);

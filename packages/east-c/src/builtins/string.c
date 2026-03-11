@@ -708,8 +708,14 @@ static EastValue *string_parse_east_impl(EastValue **args, size_t n) {
     char *error_msg = NULL;
     EastValue *result = east_parse_value_with_error(text, s_parse_east_type, &error_msg);
     if (!result) {
-        east_builtin_error(error_msg ? error_msg : "Failed to parse value");
-        free(error_msg);
+        if (error_msg) {
+            char buf[1024];
+            snprintf(buf, sizeof(buf), "Failed to parse: %s", error_msg);
+            east_builtin_error(buf);
+            free(error_msg);
+        } else {
+            east_builtin_error("Failed to parse value");
+        }
         return NULL;
     }
     return result;

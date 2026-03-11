@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/resource.h>
 
 static double elapsed_ms(struct timespec *start, struct timespec *end)
 {
@@ -500,6 +501,10 @@ static int cmd_run(const char *ir_path,
     clock_gettime(CLOCK_MONOTONIC, &t5);
 
     if (verbose) {
+        struct rusage usage;
+        getrusage(RUSAGE_SELF, &usage);
+        long peak_kb = usage.ru_maxrss;
+
         fprintf(stderr, "\nTiming:\n");
         fprintf(stderr, "  Load IR:    %8.1f ms\n", elapsed_ms(&t0, &t1));
         fprintf(stderr, "  Compile:    %8.1f ms\n", elapsed_ms(&t1, &t2));
@@ -507,6 +512,11 @@ static int cmd_run(const char *ir_path,
         fprintf(stderr, "  Output:     %8.1f ms\n", elapsed_ms(&t3, &t4));
         fprintf(stderr, "  Cleanup:    %8.1f ms\n", elapsed_ms(&t4, &t5));
         fprintf(stderr, "  Total:      %8.1f ms\n", elapsed_ms(&t0, &t5));
+        fprintf(stderr, "\nMemory:\n");
+        if (peak_kb >= 1024)
+            fprintf(stderr, "  Peak RSS:   %8.1f MB\n", (double)peak_kb / 1024.0);
+        else
+            fprintf(stderr, "  Peak RSS:   %8ld KB\n", peak_kb);
     }
 
     return exit_code;

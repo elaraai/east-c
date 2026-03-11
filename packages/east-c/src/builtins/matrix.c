@@ -17,8 +17,12 @@
 static EastValue *call_fn(EastValue *fn, EastValue **call_args, size_t nargs) {
     EvalResult r = east_call(fn->data.function.compiled, call_args, nargs);
     if (r.status == EVAL_OK || r.status == EVAL_RETURN) return r.value;
+    /* Propagate error from callback */
+    if (r.error_message) {
+        east_builtin_error(r.error_message);
+    }
     eval_result_free(&r);
-    return east_null();
+    return NULL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -289,6 +293,7 @@ static EastValue *matrix_map_elements_impl(EastValue **args, size_t n) {
             EastValue *ci = east_integer((int64_t)c);
             EastValue *call_args[] = { elem, ri, ci };
             EastValue *mapped = call_fn(fn, call_args, 3);
+            if (!mapped) { east_value_release(elem); east_value_release(ri); east_value_release(ci); east_value_release(result); return NULL; }
             mat_set_elem(result, r, c, mapped);
             east_value_release(elem);
             east_value_release(ri);
@@ -317,6 +322,11 @@ static EastValue *matrix_map_rows_impl(EastValue **args, size_t n) {
         EastValue *ri = east_integer((int64_t)r);
         EastValue *call_args[] = { row_vec, ri };
         EastValue *result_vec = call_fn(fn, call_args, 2);
+        if (!result_vec) {
+            for (size_t j = 0; j < r; j++) east_value_release(row_vecs[j]);
+            free(row_vecs); east_value_release(row_vec); east_value_release(ri);
+            return NULL;
+        }
         row_vecs[r] = result_vec;
         if (r == 0) result_cols = result_vec->data.vector.len;
         east_value_release(row_vec);

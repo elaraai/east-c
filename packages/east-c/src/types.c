@@ -260,7 +260,10 @@ static int count_back_refs(EastType *t, EastType *target)
           return n; }
 
     case EAST_TYPE_RECURSIVE:
-        return count_back_refs(t->data.recursive.node, target);
+        /* Don't recurse into other recursive wrappers — they form their
+         * own self-contained cycles.  Only the target wrapper's own node
+         * tree is relevant, and we entered that via the initial call. */
+        return 0;
 
     default:
         return 0;
@@ -327,10 +330,8 @@ static void nullify_back_refs(EastType *t, EastType *target)
         break;
 
     case EAST_TYPE_RECURSIVE:
-        if (t->data.recursive.node == target)
-            t->data.recursive.node = NULL;
-        else
-            nullify_back_refs(t->data.recursive.node, target);
+        /* Don't recurse into other recursive wrappers — they form their
+         * own self-contained cycles unrelated to `target`. */
         break;
 
     default:

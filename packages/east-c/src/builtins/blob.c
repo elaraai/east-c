@@ -41,9 +41,42 @@ static EastValue *blob_get_uint8(EastValue **args, size_t n) {
     return east_integer((int64_t)args[0]->data.blob.data[(size_t)index]);
 }
 
+/* Validate that data is valid UTF-8. Returns true if valid. */
+static bool is_valid_utf8(const uint8_t *data, size_t len) {
+    size_t i = 0;
+    while (i < len) {
+        if (data[i] < 0x80) {
+            i++;
+        } else if ((data[i] & 0xE0) == 0xC0) {
+            if (i + 1 >= len || (data[i+1] & 0xC0) != 0x80) return false;
+            if (data[i] < 0xC2) return false; /* overlong */
+            i += 2;
+        } else if ((data[i] & 0xF0) == 0xE0) {
+            if (i + 2 >= len || (data[i+1] & 0xC0) != 0x80 || (data[i+2] & 0xC0) != 0x80) return false;
+            uint32_t cp = ((data[i] & 0x0F) << 12) | ((data[i+1] & 0x3F) << 6) | (data[i+2] & 0x3F);
+            if (cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF)) return false;
+            i += 3;
+        } else if ((data[i] & 0xF8) == 0xF0) {
+            if (i + 3 >= len || (data[i+1] & 0xC0) != 0x80 || (data[i+2] & 0xC0) != 0x80 || (data[i+3] & 0xC0) != 0x80) return false;
+            uint32_t cp = ((data[i] & 0x07) << 18) | ((data[i+1] & 0x3F) << 12) | ((data[i+2] & 0x3F) << 6) | (data[i+3] & 0x3F);
+            if (cp < 0x10000 || cp > 0x10FFFF) return false;
+            i += 4;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
 static EastValue *blob_decode_utf8(EastValue **args, size_t n) {
     (void)n;
-    return east_string_len((const char *)args[0]->data.blob.data, args[0]->data.blob.len);
+    const uint8_t *data = args[0]->data.blob.data;
+    size_t len = args[0]->data.blob.len;
+    if (!is_valid_utf8(data, len)) {
+        east_builtin_error("Blob is not valid UTF-8");
+        return NULL;
+    }
+    return east_string_len((const char *)data, len);
 }
 
 static EastValue *blob_decode_utf16(EastValue **args, size_t n) {
