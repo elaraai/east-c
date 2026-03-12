@@ -1,4 +1,4 @@
-.PHONY: build rebuild test clean install install-cli services-up services-down compliance compliance-std compliance-all leak-check leak-check-std leak-check-all
+.PHONY: build rebuild test clean install install-cli services-up services-down compliance compliance-std compliance-all leak-check leak-check-std leak-check-all setup-wasm wasm wasm-clean
 
 build:
 	@mkdir -p build && cd build && cmake .. && cmake --build . -j$$(nproc)
@@ -43,3 +43,49 @@ services-up:
 
 services-down:
 	docker compose down -v
+
+# ---- WebAssembly (east-c-wasm) ----
+
+EMSDK_DIR := tools/emsdk
+EMSDK_VERSION := latest
+
+# One-time setup: clone and install Emscripten SDK
+setup-wasm:
+	@if [ ! -d "$(EMSDK_DIR)" ]; then \
+		echo "Cloning emsdk..."; \
+		mkdir -p tools; \
+		git clone https://github.com/emscripten-core/emsdk.git $(EMSDK_DIR); \
+	fi
+	@echo "Installing Emscripten $(EMSDK_VERSION)..."
+	@cd $(EMSDK_DIR) && ./emsdk install $(EMSDK_VERSION)
+	@cd $(EMSDK_DIR) && ./emsdk activate $(EMSDK_VERSION)
+	@echo ""
+	@echo "Emscripten installed. Run 'make wasm' to build."
+
+# Build WASM output
+EMCMAKE := $(EMSDK_DIR)/upstream/emscripten/emcmake
+EMMAKE := $(EMSDK_DIR)/upstream/emscripten/emmake
+
+wasm:
+	@if [ ! -f "$(EMCMAKE)" ]; then \
+		echo "Error: emsdk not found. Run 'make setup-wasm' first."; \
+		exit 1; \
+	fi
+	@export EMSDK=$(CURDIR)/$(EMSDK_DIR) && \
+		export EM_CONFIG=$(CURDIR)/$(EMSDK_DIR)/.emscripten && \
+		export PATH=$(CURDIR)/$(EMSDK_DIR)/upstream/emscripten:$(CURDIR)/$(EMSDK_DIR)/upstream/bin:$(CURDIR)/$(EMSDK_DIR)/node/22.16.0_64bit/bin:$$PATH && \
+		mkdir -p build-wasm && \
+		cd build-wasm && \
+		$(CURDIR)/$(EMCMAKE) cmake .. -DCMAKE_BUILD_TYPE=Release && \
+		cmake --build . -j$$(nproc)
+	@mkdir -p packages/east-c-wasm/dist/wasm
+	@cp build-wasm/packages/east-c-wasm/east-c.js packages/east-c-wasm/dist/wasm/
+	@cp build-wasm/packages/east-c-wasm/east-c.wasm packages/east-c-wasm/dist/wasm/
+	@echo '{ "type": "commonjs" }' > packages/east-c-wasm/dist/wasm/package.json
+	@echo ""
+	@wasm_size=$$(wc -c < packages/east-c-wasm/dist/wasm/east-c.wasm); \
+		echo "Built east-c.wasm ($$(( wasm_size / 1024 )) KB)"
+
+wasm-clean:
+	@rm -rf build-wasm
+	@rm -rf packages/east-c-wasm/dist/wasm

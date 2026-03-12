@@ -1,0 +1,24 @@
+{
+    "compilerOptions": {
+        "rootDir": ".",
+        "outDir": "./dist",
+        "module": "nodenext",
+        "target": "esnext",
+        "lib": ["esnext", "es2024", "dom"],
+        "types": ["node"],
+        "sourceMap": true,
+        "declaration": true,
+        "declarationMap": true,
+        "noUncheckedIndexedAccess": true,
+        "exactOptionalPropertyTypes": true,
+        "strict": true,
+        "verbatimModuleSyntax": true,
+        "isolatedModules": true,
+        "noUncheckedSideEffectImports": true,
+        "moduleDetection": "force",
+        "skipLibCheck": true,
+        "incremental": true,
+        "noErrorTruncation": true
+    },
+    "include": ["src/**/*.ts", "test/**/*.ts"]
+}
