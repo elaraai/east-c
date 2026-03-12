@@ -91,3 +91,41 @@ jobs:
       - name: Stop test services
         if: always()
         run: docker compose down -v
+
+  test-east-c-wasm:
+    name: Test east-c-wasm
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+
+      - name: Build WASM
+        run: |
+          mkdir -p build-wasm && cd build-wasm
+          emcmake cmake .. -DCMAKE_BUILD_TYPE=Release
+          cmake --build . -j$(nproc)
+          cd ..
+          mkdir -p packages/east-c-wasm/dist/wasm
+          cp build-wasm/packages/east-c-wasm/east-c.js packages/east-c-wasm/dist/wasm/
+          cp build-wasm/packages/east-c-wasm/east-c.wasm packages/east-c-wasm/dist/wasm/
+          echo '{ "type": "commonjs" }' > packages/east-c-wasm/dist/wasm/package.json
+
+      - name: Install npm dependencies
+        working-directory: packages/east-c-wasm
+        run: npm install
+
+      - name: Build TypeScript
+        working-directory: packages/east-c-wasm
+        run: npm run build
+
+      - name: Run tests
+        working-directory: packages/east-c-wasm
+        run: node --enable-source-maps --test 'dist/test/**/*.spec.js'
