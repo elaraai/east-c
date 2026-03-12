@@ -116,7 +116,7 @@ jobs:
           mkdir -p packages/east-c-wasm/dist/wasm
           cp build-wasm/packages/east-c-wasm/east-c.js packages/east-c-wasm/dist/wasm/
           cp build-wasm/packages/east-c-wasm/east-c.wasm packages/east-c-wasm/dist/wasm/
-          echo '{ "type": "commonjs" }' > packages/east-c-wasm/dist/wasm/package.json
+          echo '{ "type": "module" }' > packages/east-c-wasm/dist/wasm/package.json
 
       - name: Install npm dependencies
         working-directory: packages/east-c-wasm
