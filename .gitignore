@@ -1,5 +1,6 @@
 build/
 build-asan/
+build-debug/
 build-wasm/
 tools/emsdk/
 packages/east-c-wasm/dist/

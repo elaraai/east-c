@@ -11,20 +11,24 @@
  * and returns an EastWasm instance.
  */
 
-// Type for the Emscripten-generated module
-export interface EastWasmModule {
-    ccall: (name: string, returnType: string | null, argTypes: string[], args: unknown[]) => unknown;
-    cwrap: (name: string, returnType: string | null, argTypes: string[]) => (...args: unknown[]) => unknown;
-    HEAPU8: Uint8Array;
-    HEAP32: Int32Array;
-    HEAPU32: Uint32Array;
-    UTF8ToString: (ptr: number) => string;
-    stringToUTF8: (str: string, ptr: number, maxBytes: number) => void;
+import {
+    type EastTypeValue,
+    ArrayType,
+    encodeBeast2For,
+    decodeBeast2For,
+    variant,
+    EastTypeType,
+} from "@elaraai/east";
+import type { PlatformFunction } from "@elaraai/east/internal";
+
+// Extend EmscriptenModule with east-c-wasm specific C exports
+// and Emscripten runtime helpers that are on the module object but not in the base type.
+export interface EastWasmModule extends EmscriptenModule {
+    UTF8ToString: (ptr: number, maxBytesToRead?: number) => string;
+    stringToUTF8: (str: string, outPtr: number, maxBytesToRead?: number) => void;
     lengthBytesUTF8: (str: string) => number;
-    _malloc: (size: number) => number;
-    _free: (ptr: number) => void;
     _east_wasm_init: () => void;
-    _east_wasm_register_platform: (namePtr: number, isGeneric: number, isAsync: number) => void;
+    _east_wasm_register_platform: (namePtr: number, isGeneric: number, isAsync: number, inputTypesPtr: number, inputTypesLen: number) => void;
     _east_wasm_compile: (irPtr: number, irLen: number) => number;
     _east_wasm_call: (handle: number, resultPtr: number, resultLenPtr: number, errorPtr: number, errorLenPtr: number) => number;
     _east_wasm_call_with_args: (handle: number, argsPtr: number, argsLen: number, resultPtr: number, resultLenPtr: number, errorPtr: number, errorLenPtr: number) => number;
@@ -45,8 +49,9 @@ const ERROR_BUF_SIZE = 64 * 1024;
 /**
  * Platform function implementation.
  * Receives Beast2-full encoded args, returns Beast2-full encoded result (or null).
+ * May return a Promise for async platform functions (requires ASYNCIFY).
  */
-export type PlatformFn = (args: Uint8Array[]) => Uint8Array | null;
+export type PlatformFn = (args: Uint8Array[]) => Uint8Array | null | Promise<Uint8Array | null>;
 
 /**
  * Generic platform function factory.
@@ -60,6 +65,8 @@ export interface PlatformRegistration {
     isAsync: boolean;
     fn?: PlatformFn | undefined;
     factory?: GenericPlatformFactory | undefined;
+    /** Beast2-full encoded input types array — enables proper encoding of function args in the bridge */
+    inputTypesBytes?: Uint8Array | undefined;
 }
 
 /**
@@ -78,13 +85,13 @@ export interface EastWasm {
     compile(irBytes: Uint8Array): CompiledHandle;
 
     /** Execute a compiled function with no arguments. */
-    call(handle: CompiledHandle): Uint8Array | null;
+    call(handle: CompiledHandle): Promise<Uint8Array | null>;
 
     /**
      * Execute a compiled function with Beast2-full encoded arguments.
      * Args format: [count:u32le][len1:u32le][beast2_full_1]...
      */
-    callWithArgs(handle: CompiledHandle, argsBytes: Uint8Array): Uint8Array | null;
+    callWithArgs(handle: CompiledHandle, argsBytes: Uint8Array): Promise<Uint8Array | null>;
 
     /** Free a compiled function. Must be called when done. */
     free(handle: CompiledHandle): void;
@@ -155,8 +162,15 @@ export function createEastWasmFromModule(
         registerPlatform(reg: PlatformRegistration): void {
             platformFns.set(reg.name, reg);
             const namePtr = allocString(reg.name);
-            mod._east_wasm_register_platform(namePtr, reg.isGeneric ? 1 : 0, reg.isAsync ? 1 : 0);
+            let typesPtr = 0;
+            let typesLen = 0;
+            if (reg.inputTypesBytes && reg.inputTypesBytes.length > 0) {
+                typesPtr = writeBytes(reg.inputTypesBytes);
+                typesLen = reg.inputTypesBytes.length;
+            }
+            mod._east_wasm_register_platform(namePtr, reg.isGeneric ? 1 : 0, reg.isAsync ? 1 : 0, typesPtr, typesLen);
             mod._free(namePtr);
+            if (typesPtr) mod._free(typesPtr);
         },
 
         compile(irBytes: Uint8Array): CompiledHandle {
@@ -171,11 +185,11 @@ export function createEastWasmFromModule(
             return handle as CompiledHandle;
         },
 
-        call(handle: CompiledHandle): Uint8Array | null {
+        async call(handle: CompiledHandle): Promise<Uint8Array | null> {
             new DataView(mod.HEAPU8.buffer, resultLenPtr, 4).setUint32(0, RESULT_BUF_SIZE, true);
             new DataView(mod.HEAPU8.buffer, errorLenPtr, 4).setUint32(0, ERROR_BUF_SIZE, true);
 
-            const rc = mod._east_wasm_call(
+            const rc = await mod._east_wasm_call(
                 handle,
                 resultBufPtr, resultLenPtr,
                 errorBufPtr, errorLenPtr,
@@ -192,12 +206,12 @@ export function createEastWasmFromModule(
             return new Uint8Array(mod.HEAPU8.buffer, resultBufPtr, resLen).slice();
         },
 
-        callWithArgs(handle: CompiledHandle, argsBytes: Uint8Array): Uint8Array | null {
+        async callWithArgs(handle: CompiledHandle, argsBytes: Uint8Array): Promise<Uint8Array | null> {
             const argsPtr = writeBytes(argsBytes);
             new DataView(mod.HEAPU8.buffer, resultLenPtr, 4).setUint32(0, RESULT_BUF_SIZE, true);
             new DataView(mod.HEAPU8.buffer, errorLenPtr, 4).setUint32(0, ERROR_BUF_SIZE, true);
 
-            const rc = mod._east_wasm_call_with_args(
+            const rc = await mod._east_wasm_call_with_args(
                 handle,
                 argsPtr, argsBytes.length,
                 resultBufPtr, resultLenPtr,
@@ -235,13 +249,13 @@ export function createPlatformBridge(
     platformFns: Map<string, PlatformRegistration>,
     genericCache: Map<string, PlatformFn>,
     getMod: () => EastWasmModule,
-): (namePtr: number, tpPtr: number, tpLen: number, argsPtr: number, argsLen: number, outPtr: number, outLenPtr: number) => number {
+): (namePtr: number, tpPtr: number, tpLen: number, argsPtr: number, argsLen: number, outPtr: number, outLenPtr: number) => number | Promise<number> {
     return (
         namePtr: number,
         tpPtr: number, tpLen: number,
         argsPtr: number, argsLen: number,
         outPtr: number, outLenPtr: number,
-    ): number => {
+    ): number | Promise<number> => {
         const mod = getMod();
         try {
             const name = mod.UTF8ToString(namePtr);
@@ -251,8 +265,8 @@ export function createPlatformBridge(
                 return 1;
             }
 
-            // Decode args from WASM memory
-            const argsData = new Uint8Array(mod.HEAPU8.buffer, argsPtr, argsLen);
+            // Decode args from WASM memory — copy out before any async work
+            const argsData = new Uint8Array(mod.HEAPU8.buffer, argsPtr, argsLen).slice();
             const args = decodeArgsList(argsData);
 
             // Get the implementation
@@ -278,20 +292,23 @@ export function createPlatformBridge(
             // Call the implementation
             const result = impl(args);
 
-            // Write result back to WASM memory
-            if (result && result.length > 0) {
-                const outLenView = new DataView(mod.HEAPU8.buffer, outLenPtr, 4);
-                const capacity = outLenView.getUint32(0, true);
-                if (result.length > capacity) {
-                    writeErrorToWasmBridge(mod, 'platform result too large', outPtr, outLenPtr);
-                    return 1;
-                }
-                new Uint8Array(mod.HEAPU8.buffer, outPtr, result.length).set(result);
-                outLenView.setUint32(0, result.length, true);
-            } else {
-                new DataView(mod.HEAPU8.buffer, outLenPtr, 4).setUint32(0, 0, true);
+            // Async platform function — return a Promise so ASYNCIFY can suspend C
+            if (reg.isAsync) {
+                return Promise.resolve(result).then(
+                    (resolved) => {
+                        writeResultToWasm(mod, resolved, outPtr, outLenPtr);
+                        return 0;
+                    },
+                    (err) => {
+                        const msg = err instanceof Error ? err.message : String(err);
+                        writeErrorToWasmBridge(mod, msg, outPtr, outLenPtr);
+                        return 1;
+                    },
+                );
             }
 
+            // Sync path
+            writeResultToWasm(mod, result as Uint8Array | null, outPtr, outLenPtr);
             return 0;
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
@@ -299,6 +316,21 @@ export function createPlatformBridge(
             return 1;
         }
     };
+}
+
+function writeResultToWasm(mod: EastWasmModule, result: Uint8Array | null, outPtr: number, outLenPtr: number): void {
+    if (result && result.length > 0) {
+        const outLenView = new DataView(mod.HEAPU8.buffer, outLenPtr, 4);
+        const capacity = outLenView.getUint32(0, true);
+        if (result.length > capacity) {
+            writeErrorToWasmBridge(mod, 'platform result too large', outPtr, outLenPtr);
+            return;
+        }
+        new Uint8Array(mod.HEAPU8.buffer, outPtr, result.length).set(result);
+        outLenView.setUint32(0, result.length, true);
+    } else {
+        new DataView(mod.HEAPU8.buffer, outLenPtr, 4).setUint32(0, 0, true);
+    }
 }
 
 function writeErrorToWasmBridge(mod: EastWasmModule, msg: string, outPtr: number, outLenPtr: number): void {
@@ -332,6 +364,23 @@ export function decodeArgsList(data: Uint8Array): Uint8Array[] {
     return args;
 }
 
+/** Encode args list into the packed format: [count:u32le][len1:u32le][data1]... */
+export function encodeArgsList(args: Uint8Array[]): Uint8Array {
+    let totalLen = 4; // count header
+    for (const arg of args) totalLen += 4 + arg.length;
+    const buf = new Uint8Array(totalLen);
+    const view = new DataView(buf.buffer);
+    view.setUint32(0, args.length, true);
+    let offset = 4;
+    for (const arg of args) {
+        view.setUint32(offset, arg.length, true);
+        offset += 4;
+        buf.set(arg, offset);
+        offset += arg.length;
+    }
+    return buf;
+}
+
 /** Convert Uint8Array to hex string (for cache keys) */
 export function bufToHex(buf: Uint8Array): string {
     if (buf.length === 0) return '';
@@ -340,4 +389,96 @@ export function bufToHex(buf: Uint8Array): string {
         hex.push(buf[i]!.toString(16).padStart(2, '0'));
     }
     return hex.join('');
+}
+
+// ============================================================================
+// High-level platform function registration
+// ============================================================================
+
+/**
+ * Register an array of East PlatformFunction[] with a WASM instance.
+ *
+ * Bridges between the JS PlatformFunction format (decoded values) and
+ * the WASM PlatformRegistration format (Beast2-full encoded bytes).
+ */
+export function registerPlatformFunctions(wasm: EastWasm, platform: PlatformFunction[]): void {
+    for (const reg of buildPlatformRegistrations(platform)) {
+        wasm.registerPlatform(reg);
+    }
+}
+
+function buildPlatformRegistrations(allPlatform: PlatformFunction[]): PlatformRegistration[] {
+    return allPlatform.map(pf => {
+        const isGeneric = (pf.type_parameters?.length ?? 0) > 0;
+        const isAsync = pf.type === 'async';
+
+        if (isGeneric) {
+            return {
+                name: pf.name,
+                isGeneric: true,
+                isAsync,
+                factory: (typeParamsBytes: Uint8Array) => {
+                    const typeParams = decodeTypeParams(typeParamsBytes);
+                    const inputTypes = pf.inputsFn ? pf.inputsFn(...typeParams) : pf.inputs;
+                    const outputType = pf.outputsFn ? pf.outputsFn(...typeParams) : pf.output;
+                    const jsFn = pf.fn(...typeParams);
+                    return (args: Uint8Array[]) => callJsPlatformFn(jsFn, inputTypes, outputType, args, allPlatform, isAsync);
+                },
+            };
+        }
+
+        // Encode input types as Beast2-full Array(EastTypeType) for C-side bridge
+        const inputTypesBytes = encodeBeast2For(ArrayType(EastTypeType))(pf.inputs);
+
+        return {
+            name: pf.name,
+            isGeneric: false,
+            isAsync,
+            fn: (args: Uint8Array[]) => callJsPlatformFn(pf.fn, pf.inputs, pf.output, args, allPlatform, isAsync),
+            inputTypesBytes,
+        };
+    });
+}
+
+/**
+ * Bridge between WASM Beast2-encoded bytes and JS platform function implementations.
+ * Returns a Promise for async platform functions, synchronous result otherwise.
+ */
+function callJsPlatformFn(
+    fn: (...args: unknown[]) => unknown,
+    inputTypes: EastTypeValue[],
+    outputType: EastTypeValue,
+    args: Uint8Array[],
+    allPlatform?: PlatformFunction[],
+    isAsync?: boolean,
+): Uint8Array | null | Promise<Uint8Array | null> {
+    const decodeOptions = allPlatform ? { platform: allPlatform } : undefined;
+    const decoded = args.map((argBytes, i) => {
+        const decoder = decodeBeast2For(inputTypes[i]!, decodeOptions);
+        return decoder(argBytes);
+    });
+    const result = fn(...decoded);
+
+    if (isAsync) {
+        return Promise.resolve(result).then((resolved) => {
+            if (resolved === null || resolved === undefined) return null;
+            const encoder = encodeBeast2For(outputType);
+            return encoder(resolved);
+        });
+    }
+
+    if (result === null || result === undefined) return null;
+    const encoder = encodeBeast2For(outputType);
+    return encoder(result);
+}
+
+/**
+ * Decode Beast2-full encoded type params array into EastTypeValue[].
+ */
+function decodeTypeParams(typeParamsBytes: Uint8Array): EastTypeValue[] {
+    if (typeParamsBytes.length === 0) return [];
+    const decoded = decodeBeast2For(
+        ArrayType(EastTypeType)
+    )(typeParamsBytes) as EastTypeValue[];
+    return decoded;
 }

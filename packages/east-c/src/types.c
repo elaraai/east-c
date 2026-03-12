@@ -447,11 +447,33 @@ void east_type_release(EastType *t)
 /*  Structural equality                                                */
 /* ------------------------------------------------------------------ */
 
-bool east_type_equal(EastType *a, EastType *b)
+/*
+ * Recursive type comparison needs cycle detection.  Self-references in
+ * the inner tree point back to the Recursive wrapper, creating cycles.
+ * We maintain an assumption stack: when entering a Recursive pair, we
+ * assume (a, b) are equal and push them.  If we re-encounter the same
+ * pair via self-references, we return true (co-inductive reasoning).
+ */
+
+typedef struct {
+    EastType **pairs_a;
+    EastType **pairs_b;
+    size_t depth;
+    size_t cap;
+} TypeEqualCtx;
+
+static bool type_equal_ctx(EastType *a, EastType *b, TypeEqualCtx *ctx)
 {
     if (a == b) return true;
     if (!a || !b) return false;
     if (a->kind != b->kind) return false;
+
+    /* Check assumption stack — if we're already comparing this pair,
+     * it means we've reached a cycle and the types are co-inductively equal. */
+    for (size_t i = 0; i < ctx->depth; i++) {
+        if (ctx->pairs_a[i] == a && ctx->pairs_b[i] == b)
+            return true;
+    }
 
     switch (a->kind) {
     /* Primitives: kind match is sufficient */
@@ -471,11 +493,11 @@ bool east_type_equal(EastType *a, EastType *b)
     case EAST_TYPE_REF:
     case EAST_TYPE_VECTOR:
     case EAST_TYPE_MATRIX:
-        return east_type_equal(a->data.element, b->data.element);
+        return type_equal_ctx(a->data.element, b->data.element, ctx);
 
     case EAST_TYPE_DICT:
-        return east_type_equal(a->data.dict.key, b->data.dict.key) &&
-               east_type_equal(a->data.dict.value, b->data.dict.value);
+        return type_equal_ctx(a->data.dict.key, b->data.dict.key, ctx) &&
+               type_equal_ctx(a->data.dict.value, b->data.dict.value, ctx);
 
     case EAST_TYPE_STRUCT:
         if (a->data.struct_.num_fields != b->data.struct_.num_fields)
@@ -484,8 +506,8 @@ bool east_type_equal(EastType *a, EastType *b)
             if (strcmp(a->data.struct_.fields[i].name,
                        b->data.struct_.fields[i].name) != 0)
                 return false;
-            if (!east_type_equal(a->data.struct_.fields[i].type,
-                                 b->data.struct_.fields[i].type))
+            if (!type_equal_ctx(a->data.struct_.fields[i].type,
+                                b->data.struct_.fields[i].type, ctx))
                 return false;
         }
         return true;
@@ -497,8 +519,8 @@ bool east_type_equal(EastType *a, EastType *b)
             if (strcmp(a->data.variant.cases[i].name,
                        b->data.variant.cases[i].name) != 0)
                 return false;
-            if (!east_type_equal(a->data.variant.cases[i].type,
-                                 b->data.variant.cases[i].type))
+            if (!type_equal_ctx(a->data.variant.cases[i].type,
+                                b->data.variant.cases[i].type, ctx))
                 return false;
         }
         return true;
@@ -508,21 +530,49 @@ bool east_type_equal(EastType *a, EastType *b)
         if (a->data.function.num_inputs != b->data.function.num_inputs)
             return false;
         for (size_t i = 0; i < a->data.function.num_inputs; i++) {
-            if (!east_type_equal(a->data.function.inputs[i],
-                                 b->data.function.inputs[i]))
+            if (!type_equal_ctx(a->data.function.inputs[i],
+                                b->data.function.inputs[i], ctx))
                 return false;
         }
-        return east_type_equal(a->data.function.output,
-                               b->data.function.output);
+        return type_equal_ctx(a->data.function.output,
+                              b->data.function.output, ctx);
 
-    case EAST_TYPE_RECURSIVE:
-        /* Recursive types are equal if they're the same object (pointer equality)
-         * or if their inner nodes are structurally equal.
-         * Since self-references create cycles, rely on pointer equality. */
-        return false; /* a != b already checked above */
+    case EAST_TYPE_RECURSIVE: {
+        /* Push assumption that (a, b) are equal, then compare inner nodes.
+         * Self-references back to a/b will hit the assumption stack check
+         * above, terminating the recursion. */
+        if (ctx->depth >= ctx->cap) {
+            ctx->cap = ctx->cap ? ctx->cap * 2 : 8;
+            ctx->pairs_a = realloc(ctx->pairs_a, ctx->cap * sizeof(EastType *));
+            ctx->pairs_b = realloc(ctx->pairs_b, ctx->cap * sizeof(EastType *));
+        }
+        ctx->pairs_a[ctx->depth] = a;
+        ctx->pairs_b[ctx->depth] = b;
+        ctx->depth++;
+        bool result = type_equal_ctx(a->data.recursive.node,
+                                     b->data.recursive.node, ctx);
+        ctx->depth--;
+        return result;
+    }
     }
 
     return false;
+}
+
+bool east_type_equal(EastType *a, EastType *b)
+{
+    /* Fast path: pointer equality (covers non-recursive and shared types) */
+    if (a == b) return true;
+    if (!a || !b) return false;
+    if (a->kind != b->kind) return false;
+
+    /* For non-recursive types, no ctx needed — but we use the ctx path
+     * uniformly so that any nested Recursive types are handled correctly. */
+    TypeEqualCtx ctx = { NULL, NULL, 0, 0 };
+    bool result = type_equal_ctx(a, b, &ctx);
+    free(ctx.pairs_a);
+    free(ctx.pairs_b);
+    return result;
 }
 
 /* ------------------------------------------------------------------ */

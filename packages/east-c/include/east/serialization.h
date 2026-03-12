@@ -31,6 +31,8 @@ EastValue *east_beast2_decode(const uint8_t *data, size_t len, EastType *type);
 // BEAST2 with header (magic bytes + type schema + value)
 ByteBuffer *east_beast2_encode_full(EastValue *value, EastType *type);
 EastValue *east_beast2_decode_full(const uint8_t *data, size_t len, EastType *type);
+// BEAST2-full decode using the embedded type schema (self-describing)
+EastValue *east_beast2_decode_auto(const uint8_t *data, size_t len);
 
 // Beast v1 binary serialization (magic + type schema + twiddled values)
 ByteBuffer *east_beast_encode(EastValue *value, EastType *type);

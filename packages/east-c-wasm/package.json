@@ -30,7 +30,9 @@
     ],
     "scripts": {
         "build": "tsc",
-        "test": "npm run build && node --enable-source-maps --test 'dist/test/**/*.spec.js'",
+        "test": "npm run build && node --enable-source-maps --test 'dist/test/wasm.spec.js'",
+        "test:compliance": "npm run build && node --enable-source-maps --test 'dist/test/compliance.spec.js'",
+        "test:all": "npm run build && node --enable-source-maps --test 'dist/test/**/*.spec.js'",
         "lint": "eslint .",
         "package": "npm run build && mkdir -p .package && npm pack --pack-destination .package"
     },
@@ -45,8 +47,13 @@
     "engines": {
         "node": ">=22.0.0"
     },
+    "peerDependencies": {
+        "@elaraai/east": "beta"
+    },
     "devDependencies": {
         "@elaraai/east": "beta",
+        "@elaraai/east-node-std": "^0.0.1-beta.38",
+        "@types/emscripten": "^1.41.5",
         "@types/node": "^22.18.1",
         "typescript": "^5.8.3"
     }

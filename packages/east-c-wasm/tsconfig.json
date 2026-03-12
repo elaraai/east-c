@@ -5,7 +5,7 @@
         "module": "nodenext",
         "target": "esnext",
         "lib": ["esnext", "es2024", "dom"],
-        "types": ["node"],
+        "types": ["node", "emscripten"],
         "sourceMap": true,
         "declaration": true,
         "declarationMap": true,

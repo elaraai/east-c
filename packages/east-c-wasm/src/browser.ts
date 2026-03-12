@@ -22,6 +22,7 @@ import {
 
 export type { EastWasm, EastWasmOptions, PlatformFn, PlatformRegistration };
 export type { CompiledHandle, GenericPlatformFactory, EastWasmModule } from './common.js';
+export { registerPlatformFunctions } from './common.js';
 
 /**
  * Load and initialize the WASM module in a browser environment.

@@ -26,6 +26,48 @@ static BuiltinRegistry *g_builtins = NULL;
 static int g_initialized = 0;
 
 /* ------------------------------------------------------------------ */
+/*  Per-platform-function input type registry                          */
+/*                                                                     */
+/*  When JS registers a platform function, it can also provide the     */
+/*  declared input types. The bridge uses these for proper Beast2       */
+/*  encoding (critical for function values, which can't be inferred).  */
+/* ------------------------------------------------------------------ */
+
+typedef struct PlatformInputTypes {
+    char *name;
+    EastType **input_types;
+    size_t num_inputs;
+    struct PlatformInputTypes *next;
+} PlatformInputTypes;
+
+#define INPUT_TYPE_BUCKETS 64
+static PlatformInputTypes *g_input_types[INPUT_TYPE_BUCKETS];
+
+static uint32_t input_types_hash(const char *name) {
+    uint32_t h = 5381;
+    for (const char *c = name; *c; c++) h = h * 33 + (uint32_t)*c;
+    return h % INPUT_TYPE_BUCKETS;
+}
+
+static PlatformInputTypes *get_input_types(const char *name) {
+    uint32_t h = input_types_hash(name);
+    for (PlatformInputTypes *e = g_input_types[h]; e; e = e->next) {
+        if (strcmp(e->name, name) == 0) return e;
+    }
+    return NULL;
+}
+
+static void store_input_types(const char *name, EastType **types, size_t count) {
+    uint32_t h = input_types_hash(name);
+    PlatformInputTypes *e = calloc(1, sizeof(PlatformInputTypes));
+    e->name = strdup(name);
+    e->input_types = types;
+    e->num_inputs = count;
+    e->next = g_input_types[h];
+    g_input_types[h] = e;
+}
+
+/* ------------------------------------------------------------------ */
 /*  JS-imported platform function bridge                               */
 /* ------------------------------------------------------------------ */
 
@@ -48,11 +90,12 @@ static int g_initialized = 0;
 /*
  * JS platform call bridge.
  *
- * Implemented as EM_JS so Emscripten links it as a JS import.
+ * Uses EM_JS with Asyncify.handleAsync for async platform functions.
+ * For sync platform functions (which return a plain number), no ASYNCIFY
+ * overhead is incurred.
+ *
  * The actual implementation is overridden at module instantiation time
  * via moduleOpts.js_platform_call from the TypeScript wrapper.
- *
- * This stub calls into Module.js_platform_call which the TS wrapper sets up.
  */
 EM_JS(int, js_platform_call, (
     const char *name,
@@ -61,8 +104,12 @@ EM_JS(int, js_platform_call, (
     uint8_t *out_buf, size_t *out_len
 ), {
     if (Module.js_platform_call) {
-        return Module.js_platform_call(name, type_params_buf, type_params_len,
-                                        args_buf, args_len, out_buf, out_len);
+        var result = Module.js_platform_call(name, type_params_buf, type_params_len,
+                                              args_buf, args_len, out_buf, out_len);
+        if (result && typeof result.then === 'function') {
+            return Asyncify.handleAsync(function() { return result; });
+        }
+        return result;
     }
     /* No handler registered — write error */
     return 1;
@@ -156,49 +203,44 @@ static EvalResult platform_bridge_fn(EastValue **args, size_t num_args) {
     uint32_t count = (uint32_t)num_args;
     byte_buffer_write_bytes(args_buf, (uint8_t *)&count, 4);
 
+    /* Look up declared input types (set at registration time by JS) */
+    PlatformInputTypes *declared = get_input_types(t->name);
+
     for (size_t i = 0; i < num_args; i++) {
-        /* For each arg, we need its type. We can get it from the value kind,
-         * but for full fidelity we need the IR type. Since platform functions
-         * receive already-evaluated EastValues, we'll use beast2_encode_full
-         * which embeds the type. But we need the type...
-         *
-         * The solution: use the trampoline's type_params to reconstruct
-         * the argument types. For generic platform functions, type_params
-         * describe the parameterized types. The actual arg types depend on
-         * the platform function signature, which JS knows.
-         *
-         * Simpler approach: encode each value with its concrete type from
-         * the EastValue itself. We'll add a helper for this.
-         */
         EastType *arg_type = NULL;
         EastValue *v = args[i];
+        bool type_owned = false;  /* true if we constructed a type that needs release */
 
-        /* Infer type from value */
-        switch (v->kind) {
-            case EAST_VAL_NULL:     arg_type = &east_null_type; break;
-            case EAST_VAL_BOOLEAN:  arg_type = &east_boolean_type; break;
-            case EAST_VAL_INTEGER:  arg_type = &east_integer_type; break;
-            case EAST_VAL_FLOAT:    arg_type = &east_float_type; break;
-            case EAST_VAL_STRING:   arg_type = &east_string_type; break;
-            case EAST_VAL_DATETIME: arg_type = &east_datetime_type; break;
-            case EAST_VAL_BLOB:     arg_type = &east_blob_type; break;
-            case EAST_VAL_ARRAY:    { east_type_retain(v->data.array.elem_type);
-                                      arg_type = east_array_type(v->data.array.elem_type); break; }
-            case EAST_VAL_SET:      { east_type_retain(v->data.set.elem_type);
-                                      arg_type = east_set_type(v->data.set.elem_type); break; }
-            case EAST_VAL_DICT:     { east_type_retain(v->data.dict.key_type);
-                                      east_type_retain(v->data.dict.val_type);
-                                      arg_type = east_dict_type(v->data.dict.key_type, v->data.dict.val_type); break; }
-            case EAST_VAL_STRUCT:   { east_type_retain(v->data.struct_.type);
-                                      arg_type = v->data.struct_.type; break; }
-            case EAST_VAL_VARIANT:  { east_type_retain(v->data.variant.type);
-                                      arg_type = v->data.variant.type; break; }
-            case EAST_VAL_REF:      arg_type = &east_blob_type; break; /* fallback */
-            case EAST_VAL_VECTOR:   { east_type_retain(v->data.vector.elem_type);
-                                      arg_type = east_vector_type(v->data.vector.elem_type); break; }
-            case EAST_VAL_MATRIX:   { east_type_retain(v->data.matrix.elem_type);
-                                      arg_type = east_matrix_type(v->data.matrix.elem_type); break; }
-            case EAST_VAL_FUNCTION: arg_type = &east_blob_type; break; /* fallback */
+        /* Use declared type if available, otherwise infer from value */
+        if (declared && i < declared->num_inputs) {
+            arg_type = declared->input_types[i];
+        } else {
+            switch (v->kind) {
+                case EAST_VAL_NULL:     arg_type = &east_null_type; break;
+                case EAST_VAL_BOOLEAN:  arg_type = &east_boolean_type; break;
+                case EAST_VAL_INTEGER:  arg_type = &east_integer_type; break;
+                case EAST_VAL_FLOAT:    arg_type = &east_float_type; break;
+                case EAST_VAL_STRING:   arg_type = &east_string_type; break;
+                case EAST_VAL_DATETIME: arg_type = &east_datetime_type; break;
+                case EAST_VAL_BLOB:     arg_type = &east_blob_type; break;
+                case EAST_VAL_ARRAY:    { east_type_retain(v->data.array.elem_type);
+                                          arg_type = east_array_type(v->data.array.elem_type); type_owned = true; break; }
+                case EAST_VAL_SET:      { east_type_retain(v->data.set.elem_type);
+                                          arg_type = east_set_type(v->data.set.elem_type); type_owned = true; break; }
+                case EAST_VAL_DICT:     { east_type_retain(v->data.dict.key_type);
+                                          east_type_retain(v->data.dict.val_type);
+                                          arg_type = east_dict_type(v->data.dict.key_type, v->data.dict.val_type); type_owned = true; break; }
+                case EAST_VAL_STRUCT:   { east_type_retain(v->data.struct_.type);
+                                          arg_type = v->data.struct_.type; break; }
+                case EAST_VAL_VARIANT:  { east_type_retain(v->data.variant.type);
+                                          arg_type = v->data.variant.type; break; }
+                case EAST_VAL_REF:      arg_type = &east_blob_type; break; /* fallback */
+                case EAST_VAL_VECTOR:   { east_type_retain(v->data.vector.elem_type);
+                                          arg_type = east_vector_type(v->data.vector.elem_type); type_owned = true; break; }
+                case EAST_VAL_MATRIX:   { east_type_retain(v->data.matrix.elem_type);
+                                          arg_type = east_matrix_type(v->data.matrix.elem_type); type_owned = true; break; }
+                case EAST_VAL_FUNCTION: arg_type = &east_blob_type; break; /* unreachable if declared types provided */
+            }
         }
 
         ByteBuffer *vbuf = east_beast2_encode_full(v, arg_type);
@@ -210,10 +252,7 @@ static EvalResult platform_bridge_fn(EastValue **args, size_t num_args) {
 
         byte_buffer_free(vbuf);
 
-        /* Release constructed types (not primitives/singletons) */
-        if (v->kind == EAST_VAL_ARRAY || v->kind == EAST_VAL_SET ||
-            v->kind == EAST_VAL_DICT || v->kind == EAST_VAL_VECTOR ||
-            v->kind == EAST_VAL_MATRIX) {
+        if (type_owned) {
             east_type_release(arg_type);
         }
     }
@@ -244,8 +283,8 @@ static EvalResult platform_bridge_fn(EastValue **args, size_t num_args) {
         return eval_ok(east_null());
     }
 
-    /* Decode result from Beast2-full */
-    EastValue *result = east_beast2_decode_full(g_platform_result_buf, out_len, NULL);
+    /* Decode result from Beast2-full (self-describing — type is embedded) */
+    EastValue *result = east_beast2_decode_auto(g_platform_result_buf, out_len);
     if (!result) {
         return eval_error("platform bridge: failed to decode result from JS");
     }
@@ -405,6 +444,11 @@ const char *east_wasm_last_error(void) {
     return g_last_error;
 }
 
+/* Pre-call hook: set up trampoline context before platform function dispatch */
+static void wasm_platform_pre_call(const char *name, EastType **type_params, size_t num_type_params) {
+    g_current_trampoline = get_or_create_trampoline(name, type_params, num_type_params);
+}
+
 EMSCRIPTEN_KEEPALIVE
 void east_wasm_init(void) {
     if (g_initialized) return;
@@ -412,6 +456,7 @@ void east_wasm_init(void) {
     east_type_of_type_init();
 
     g_platform = platform_registry_new();
+    g_platform->pre_call = wasm_platform_pre_call;
     g_builtins = builtin_registry_new();
     east_register_all_builtins(g_builtins);
 
@@ -430,9 +475,31 @@ void east_wasm_init(void) {
  * name: null-terminated function name (e.g. "state_read")
  * is_generic: true if the function takes type parameters
  * is_async: true if the function is async
+ * input_types_buf: Beast2-full encoded array of input types (or NULL)
+ * input_types_len: length of input_types_buf
  */
 EMSCRIPTEN_KEEPALIVE
-void east_wasm_register_platform(const char *name, int is_generic, int is_async) {
+void east_wasm_register_platform(const char *name, int is_generic, int is_async,
+                                  const uint8_t *input_types_buf, size_t input_types_len) {
+    /* Decode and store input types if provided */
+    if (input_types_buf && input_types_len > 0) {
+        if (!east_type_type) east_type_of_type_init();
+
+        EastType *arr_type = east_array_type(east_type_type);
+        EastValue *types_arr = east_beast2_decode_full(input_types_buf, input_types_len, arr_type);
+        east_type_release(arr_type);
+
+        if (types_arr && types_arr->kind == EAST_VAL_ARRAY) {
+            size_t n = types_arr->data.array.len;
+            EastType **types = calloc(n, sizeof(EastType *));
+            for (size_t i = 0; i < n; i++) {
+                types[i] = east_type_from_value(types_arr->data.array.items[i]);
+            }
+            store_input_types(name, types, n);
+        }
+        if (types_arr) east_value_release(types_arr);
+    }
+
     if (is_generic) {
         platform_registry_add_generic(g_platform, name, platform_bridge_factory, is_async != 0);
     } else {
@@ -470,9 +537,14 @@ uint32_t east_wasm_compile(const uint8_t *ir_bytes, size_t ir_len) {
         return 0;
     }
 
-    /* Extract body if top-level is a function */
+    /* Extract body if top-level is a function, preserving param names
+     * so that callWithArgs can bind arguments properly. */
     IRNode *body = ir;
+    size_t num_params = 0;
+    IRVariable *params = NULL;
     if (ir->kind == IR_ASYNC_FUNCTION || ir->kind == IR_FUNCTION) {
+        num_params = ir->data.function.num_params;
+        params = ir->data.function.params;
         body = ir->data.function.body;
     }
 
@@ -482,6 +554,17 @@ uint32_t east_wasm_compile(const uint8_t *ir_bytes, size_t ir_len) {
         set_last_error("failed to compile IR");
         ir_node_release(ir);
         return 0;
+    }
+
+    /* Set parameter names from the function IR so east_call can bind args */
+    if (num_params > 0 && params) {
+        fn->num_params = num_params;
+        fn->param_names = calloc(num_params, sizeof(char *));
+        if (fn->param_names) {
+            for (size_t i = 0; i < num_params; i++) {
+                fn->param_names[i] = strdup(params[i].name);
+            }
+        }
     }
 
     uint32_t handle = alloc_handle(fn);
@@ -613,7 +696,7 @@ int east_wasm_call_with_args(uint32_t handle,
             memcpy(&vlen, args_buf + offset, 4);
             offset += 4;
             if (offset + vlen > args_len) break;
-            args[i] = east_beast2_decode_full(args_buf + offset, vlen, NULL);
+            args[i] = east_beast2_decode_auto(args_buf + offset, vlen);
             offset += vlen;
         }
     }

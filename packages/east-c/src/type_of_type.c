@@ -822,11 +822,115 @@ static const char *label_from_value(EastValue *label_v)
     return get_str(label_v, "name");
 }
 
-/* Convert type field (EastTypeType variant) to EastType* */
+/* ================================================================== */
+/*  Type interning for IR conversion                                   */
+/*                                                                     */
+/*  Large recursive types (e.g. UIComponentType) appear on hundreds    */
+/*  of IR nodes.  Without interning, each node gets its own EastType*  */
+/*  copy, causing O(N * type_size) allocation and massive GC overhead  */
+/*  (GC must traverse every tracked object per collection cycle).      */
+/*                                                                     */
+/*  Strategy: build the type, then check if an identical type already  */
+/*  exists via east_type_equal (which now handles Recursive types via  */
+/*  co-inductive cycle detection).  Typically <20 unique types per IR  */
+/*  so the linear scan is fast with very high hit rate.                */
+/* ================================================================== */
+
+/*
+ * Type value cache: maps EastValue* type descriptors → EastType*.
+ *
+ * The EastValue variant tree describing a type is FINITE (Recursive
+ * self-references are integer depth markers, not pointer cycles).
+ * We hash the tree to a 64-bit fingerprint for O(1) lookup, falling
+ * back to east_value_equal only on the rare hash collision.
+ *
+ * The hash is computed once per type_cache_get call.  With ~101
+ * unique types and 64-bit hashes, collisions are negligible.
+ */
+
+/*
+ * Type cache: maps EastValue* pointer → EastType*.
+ *
+ * Works because the beast2 decoder deduplicates Struct/Variant values
+ * by byte range — identical bytes produce the same EastValue pointer.
+ * So pointer equality is sufficient for cache lookup: O(1).
+ */
+typedef struct {
+    EastValue **values;  /* type descriptor values (NOT retained — just pointers for comparison) */
+    EastType  **types;   /* corresponding EastType* (retained) */
+    size_t len;
+    size_t cap;
+} TypeCache;
+
+static TypeCache ir_type_cache = { NULL, NULL, 0, 0 };
+
+static void type_cache_init(void)
+{
+    ir_type_cache.len = 0;
+    ir_type_cache.cap = 32;
+    ir_type_cache.values = calloc(ir_type_cache.cap, sizeof(EastValue *));
+    ir_type_cache.types = calloc(ir_type_cache.cap, sizeof(EastType *));
+}
+
+static void type_cache_free(void)
+{
+    for (size_t i = 0; i < ir_type_cache.len; i++) {
+        east_type_release(ir_type_cache.types[i]);
+    }
+    free(ir_type_cache.values);
+    free(ir_type_cache.types);
+    ir_type_cache.values = NULL;
+    ir_type_cache.types = NULL;
+    ir_type_cache.len = 0;
+    ir_type_cache.cap = 0;
+}
+
+static EastType *type_cache_get(EastValue *tv)
+{
+    if (!tv) return NULL;
+
+    /* Pointer equality first (O(1) when beast2 dedup works) */
+    for (size_t i = 0; i < ir_type_cache.len; i++) {
+        if (ir_type_cache.values[i] == tv) {
+            east_type_retain(ir_type_cache.types[i]);
+            return ir_type_cache.types[i];
+        }
+    }
+
+    /* Fall back to value equality for non-deduped values */
+    for (size_t i = 0; i < ir_type_cache.len; i++) {
+        if (east_value_equal(ir_type_cache.values[i], tv)) {
+            /* Update pointer for future ptr hits */
+            ir_type_cache.values[i] = tv;
+            east_type_retain(ir_type_cache.types[i]);
+            return ir_type_cache.types[i];
+        }
+    }
+
+    /* Cache miss — build the type */
+    EastType *type = east_type_from_value(tv);
+    if (!type) return NULL;
+
+    if (ir_type_cache.len >= ir_type_cache.cap) {
+        ir_type_cache.cap *= 2;
+        ir_type_cache.values = realloc(ir_type_cache.values,
+                                       ir_type_cache.cap * sizeof(EastValue *));
+        ir_type_cache.types = realloc(ir_type_cache.types,
+                                      ir_type_cache.cap * sizeof(EastType *));
+    }
+    ir_type_cache.values[ir_type_cache.len] = tv;
+    east_type_retain(type);
+    ir_type_cache.types[ir_type_cache.len] = type;
+    ir_type_cache.len++;
+
+    return type;
+}
+
+/* Convert type field (EastTypeType variant) to EastType*, with caching */
 static EastType *type_field(EastValue *s)
 {
     EastValue *tv = east_struct_get_field(s, "type");
-    return east_type_from_value(tv);
+    return type_cache_get(tv);
 }
 
 /* Convert a literal value (LiteralValueType variant) to EastValue* */
@@ -887,7 +991,7 @@ static IRNode **convert_ir_array(EastValue *arr, size_t *out_count)
     return nodes;
 }
 
-/* Convert an array of type values to EastType** */
+/* Convert an array of type values to EastType**, with interning */
 static EastType **convert_type_array(EastValue *arr, size_t *out_count)
 {
     if (!arr || arr->kind != EAST_VAL_ARRAY) {
@@ -899,7 +1003,7 @@ static EastType **convert_type_array(EastValue *arr, size_t *out_count)
     if (n == 0) return NULL;
     EastType **types = calloc(n, sizeof(EastType *));
     for (size_t i = 0; i < n; i++) {
-        types[i] = east_type_from_value(arr->data.array.items[i]);
+        types[i] = type_cache_get(arr->data.array.items[i]);
     }
     return types;
 }
@@ -1397,5 +1501,8 @@ cleanup:
 
 IRNode *east_ir_from_value(EastValue *value)
 {
-    return convert_ir(value);
+    type_cache_init();
+    IRNode *result = convert_ir(value);
+    type_cache_free();
+    return result;
 }

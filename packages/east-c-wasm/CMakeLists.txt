@@ -55,6 +55,10 @@ target_link_options(east-c-wasm PRIVATE
     "SHELL:-s FILESYSTEM=0"
     "SHELL:-s TOTAL_STACK=1048576"
     "SHELL:-s INITIAL_MEMORY=16777216"
+    # Async support — allows C to call async JS platform functions
+    "SHELL:-s ASYNCIFY"
+    "SHELL:-s ASYNCIFY_IMPORTS=['js_platform_call']"
+    "SHELL:-s ASYNCIFY_STACK_SIZE=4096"
     # Optimizations
     "SHELL:-O3"
     "SHELL:--closure 0"
