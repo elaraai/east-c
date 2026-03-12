@@ -35,5 +35,11 @@ FetchContent_MakeAvailable(pcre2)
 enable_testing()
 
 add_subdirectory(packages/east-c)
-add_subdirectory(packages/east-c-std)
-add_subdirectory(packages/east-c-cli)
+
+# WASM build only includes the core library — no std or CLI
+if(EMSCRIPTEN)
+    add_subdirectory(packages/east-c-wasm)
+else()
+    add_subdirectory(packages/east-c-std)
+    add_subdirectory(packages/east-c-cli)
+endif()
