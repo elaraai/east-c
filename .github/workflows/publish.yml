@@ -121,13 +121,20 @@ jobs:
 
           echo "Version: $current -> $new_version"
 
-      - name: Commit and tag
+      - name: Commit and push version bump
         if: ${{ !inputs.dry_run }}
         run: |
+          TAG_NAME="${{ steps.bump.outputs.new_version }}"
+
           git add VERSION
-          git commit -m "chore: bump version to ${{ steps.bump.outputs.new_version }}"
-          git tag "${{ steps.bump.outputs.new_version }}"
-          git push origin HEAD --tags
+          git commit -m "chore: bump version to ${TAG_NAME}"
+
+          # Delete stale remote tag if it exists from a previous failed run
+          git push origin ":refs/tags/${TAG_NAME}" 2>/dev/null || true
+
+          # Create tag and push
+          git tag -f "${TAG_NAME}"
+          git push origin HEAD:main "${TAG_NAME}"
 
   build:
     name: Build ${{ matrix.artifact }}
@@ -259,13 +266,23 @@ jobs:
           fi
           echo "new_version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
 
-      - name: Commit and tag
+      - name: Commit and push version bump
         if: ${{ !inputs.dry_run }}
         run: |
+          TAG_NAME="east-c-wasm-${{ steps.version_wasm.outputs.new_version }}"
+
+          # Pull latest main (version job may have pushed ahead of us)
+          git pull --rebase origin main
+
           git add packages/east-c-wasm/package.json
           git commit -m "chore: bump east-c-wasm to ${{ steps.version_wasm.outputs.new_version }}"
-          git tag "east-c-wasm-${{ steps.version_wasm.outputs.new_version }}"
-          git push origin HEAD --tags
+
+          # Delete stale remote tag if it exists from a previous failed run
+          git push origin ":refs/tags/${TAG_NAME}" 2>/dev/null || true
+
+          # Create tag and push
+          git tag -f "${TAG_NAME}"
+          git push origin HEAD:main "${TAG_NAME}"
 
       - name: Publish @elaraai/east-c-wasm
         if: ${{ !inputs.dry_run }}
