@@ -9,6 +9,14 @@
             "types": "./dist/src/index.d.ts",
             "default": "./dist/src/index.js"
         },
+        "./browser": {
+            "types": "./dist/src/browser.d.ts",
+            "default": "./dist/src/browser.js"
+        },
+        "./common": {
+            "types": "./dist/src/common.d.ts",
+            "default": "./dist/src/common.js"
+        },
         "./east-c.wasm": "./dist/wasm/east-c.wasm"
     },
     "files": [
