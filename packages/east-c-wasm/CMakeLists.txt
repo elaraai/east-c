@@ -48,6 +48,7 @@ target_link_options(east-c-wasm PRIVATE
     "SHELL:-s EXPORTED_RUNTIME_METHODS='[\"ccall\",\"cwrap\",\"HEAPU8\",\"HEAP32\",\"HEAPU32\",\"UTF8ToString\",\"stringToUTF8\",\"lengthBytesUTF8\"]'"
     "SHELL:-s ALLOW_MEMORY_GROWTH=1"
     "SHELL:-s MODULARIZE=1"
+    "SHELL:-s EXPORT_ES6=1"
     "SHELL:-s EXPORT_NAME='createEastWasmModule'"
     "SHELL:-s ENVIRONMENT='web,worker,node'"
     "SHELL:-s NO_EXIT_RUNTIME=1"

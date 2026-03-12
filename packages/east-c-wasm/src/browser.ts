@@ -43,24 +43,10 @@ export async function createEastWasmBrowser(options: EastWasmOptions & { wasmUrl
 
     const bridge = createPlatformBridge(platformFns, genericCache, () => mod);
 
-    // Load the Emscripten glue JS. It's typically CJS, so we fetch it as text
-    // and evaluate via a blob URL to avoid issues with bundlers and CJS/ESM mismatch.
-    const glueResponse = await fetch(glueUrl);
-    const glueText = await glueResponse.text();
-    const blobUrl = URL.createObjectURL(
-        new Blob(
-            [`${glueText}\nexport default Module;`],
-            { type: 'application/javascript' }
-        )
-    );
-
-    let createModule: (opts?: Record<string, unknown>) => Promise<EastWasmModule>;
-    try {
-        const glueModule = await import(/* @vite-ignore */ blobUrl);
-        createModule = glueModule.default;
-    } finally {
-        URL.revokeObjectURL(blobUrl);
-    }
+    // The Emscripten glue is built with EXPORT_ES6=1, so it's a native ESM
+    // with `export default createEastWasmModule`. Dynamic import works directly.
+    const glueModule = await import(/* @vite-ignore */ glueUrl);
+    const createModule: (opts?: Record<string, unknown>) => Promise<EastWasmModule> = glueModule.default;
 
     const moduleOpts: Record<string, unknown> = {
         locateFile(path: string) {
