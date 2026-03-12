@@ -271,11 +271,12 @@ jobs:
         run: |
           TAG_NAME="east-c-wasm-${{ steps.version_wasm.outputs.new_version }}"
 
-          # Pull latest main (version job may have pushed ahead of us)
-          git pull --rebase origin main
-
+          # Commit the version bump first (npm version left unstaged changes)
           git add packages/east-c-wasm/package.json
           git commit -m "chore: bump east-c-wasm to ${{ steps.version_wasm.outputs.new_version }}"
+
+          # Rebase onto latest main (version job may have pushed ahead of us)
+          git pull --rebase origin main
 
           # Delete stale remote tag if it exists from a previous failed run
           git push origin ":refs/tags/${TAG_NAME}" 2>/dev/null || true
