@@ -15,7 +15,6 @@
  * `@elaraai/east-c-wasm/browser`.
  */
 
-import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -42,10 +41,10 @@ export async function createEastWasm(options?: EastWasmOptions): Promise<EastWas
     const __dirname = dirname(__filename);
     const wasmDir = join(__dirname, '..', 'wasm');
 
-    // Load the Emscripten glue file using createRequire (it's a CJS module)
-    const require = createRequire(import.meta.url);
+    // Load the Emscripten glue file (ESM with EXPORT_ES6=1)
     const gluePath = options?.glueUrl ?? join(wasmDir, 'east-c.js');
-    const createModule = require(gluePath) as (opts?: Record<string, unknown>) => Promise<EastWasmModule>;
+    const glueModule = await import(gluePath);
+    const createModule = glueModule.default as (opts?: Record<string, unknown>) => Promise<EastWasmModule>;
 
     const wasmPath = options?.wasmUrl ?? join(wasmDir, 'east-c.wasm');
 

@@ -81,7 +81,7 @@ wasm:
 	@mkdir -p packages/east-c-wasm/dist/wasm
 	@cp build-wasm/packages/east-c-wasm/east-c.js packages/east-c-wasm/dist/wasm/
 	@cp build-wasm/packages/east-c-wasm/east-c.wasm packages/east-c-wasm/dist/wasm/
-	@echo '{ "type": "commonjs" }' > packages/east-c-wasm/dist/wasm/package.json
+	@echo '{ "type": "module" }' > packages/east-c-wasm/dist/wasm/package.json
 	@echo ""
 	@wasm_size=$$(wc -c < packages/east-c-wasm/dist/wasm/east-c.wasm); \
 		echo "Built east-c.wasm ($$(( wasm_size / 1024 )) KB)"
