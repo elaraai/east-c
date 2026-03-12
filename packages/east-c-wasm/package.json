@@ -17,7 +17,8 @@
             "types": "./dist/src/common.d.ts",
             "default": "./dist/src/common.js"
         },
-        "./east-c.wasm": "./dist/wasm/east-c.wasm"
+        "./east-c.wasm": "./dist/wasm/east-c.wasm",
+        "./glue": "./dist/wasm/east-c.js"
     },
     "files": [
         "dist/src",
