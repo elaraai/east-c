@@ -1,4 +1,4 @@
-name: Publish
+name: Publish Binaries
 
 on:
   workflow_dispatch:
@@ -16,11 +16,6 @@ on:
           - patch        # 0.0.1 -> 0.0.2
           - minor        # 0.0.1 -> 0.1.0
           - major        # 0.0.1 -> 1.0.0
-      publish_east_c_wasm:
-        description: 'Publish @elaraai/east-c-wasm to npm'
-        required: true
-        default: true
-        type: boolean
       dry_run:
         description: 'Dry run (skip actual publish)'
         required: false
@@ -28,8 +23,7 @@ on:
         type: boolean
 
 jobs:
-  version:
-    name: Bump version
+  publish:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -121,24 +115,19 @@ jobs:
 
           echo "Version: $current -> $new_version"
 
-      - name: Commit and push version bump
+      - name: Commit version bump
         if: ${{ !inputs.dry_run }}
         run: |
           TAG_NAME="${{ steps.bump.outputs.new_version }}"
-
           git add VERSION
           git commit -m "chore: bump version to ${TAG_NAME}"
-
-          # Delete stale remote tag if it exists from a previous failed run
           git push origin ":refs/tags/${TAG_NAME}" 2>/dev/null || true
-
-          # Create tag and push
           git tag -f "${TAG_NAME}"
           git push origin HEAD:main "${TAG_NAME}"
 
   build:
     name: Build ${{ matrix.artifact }}
-    needs: version
+    needs: publish
     strategy:
       matrix:
         include:
@@ -157,7 +146,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.dry_run && '' || needs.version.outputs.new_version }}
+          ref: ${{ inputs.dry_run && '' || needs.publish.outputs.new_version }}
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
@@ -183,125 +172,9 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
-  wasm:
-    name: Build & publish east-c-wasm
-    needs: version
-    if: ${{ inputs.publish_east_c_wasm }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      id-token: write  # Required for npm trusted publishers (OIDC)
-
-    steps:
-      - name: Generate app token
-        uses: actions/create-github-app-token@v1
-        id: app-token
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ steps.app-token.outputs.token }}
-
-      - name: Configure git
-        run: |
-          git config user.name "elara-ci[bot]"
-          git config user.email "elara-ci[bot]@users.noreply.github.com"
-
-      - name: Use Node.js 22.x
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22.x
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Upgrade npm for trusted publishing
-        run: npm install -g npm@latest
-
-      - name: Setup Emscripten
-        uses: mymindstorm/setup-emsdk@v14
-
-      - name: Build WASM
-        run: |
-          mkdir -p build-wasm && cd build-wasm
-          emcmake cmake .. -DCMAKE_BUILD_TYPE=Release
-          cmake --build . -j$(nproc)
-          cd ..
-          mkdir -p packages/east-c-wasm/dist/wasm
-          cp build-wasm/packages/east-c-wasm/east-c.js packages/east-c-wasm/dist/wasm/
-          cp build-wasm/packages/east-c-wasm/east-c.wasm packages/east-c-wasm/dist/wasm/
-          echo '{ "type": "commonjs" }' > packages/east-c-wasm/dist/wasm/package.json
-
-      - name: Install npm dependencies
-        working-directory: packages/east-c-wasm
-        run: npm install
-
-      - name: Build TypeScript
-        working-directory: packages/east-c-wasm
-        run: npm run build
-
-      - name: Run tests
-        working-directory: packages/east-c-wasm
-        run: node --enable-source-maps --test 'dist/test/**/*.spec.js'
-
-      - name: Determine npm tag
-        id: npm_tag
-        run: |
-          if [[ "${{ inputs.release_type }}" == pre* ]]; then
-            echo "tag=beta" >> $GITHUB_OUTPUT
-            echo "prerelease=true" >> $GITHUB_OUTPUT
-          else
-            echo "tag=latest" >> $GITHUB_OUTPUT
-            echo "prerelease=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Bump east-c-wasm version
-        id: version_wasm
-        working-directory: packages/east-c-wasm
-        run: |
-          if [[ "${{ inputs.release_type }}" == pre* ]]; then
-            npm version ${{ inputs.release_type }} --preid=beta --no-git-tag-version
-          else
-            npm version ${{ inputs.release_type }} --no-git-tag-version
-          fi
-          echo "new_version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
-
-      - name: Commit and push version bump
-        if: ${{ !inputs.dry_run }}
-        run: |
-          TAG_NAME="east-c-wasm-${{ steps.version_wasm.outputs.new_version }}"
-
-          # Commit the version bump first (npm version left unstaged changes)
-          git add packages/east-c-wasm/package.json
-          git commit -m "chore: bump east-c-wasm to ${{ steps.version_wasm.outputs.new_version }}"
-
-          # Rebase onto latest main (version job may have pushed ahead of us)
-          git pull --rebase origin main
-
-          # Delete stale remote tag if it exists from a previous failed run
-          git push origin ":refs/tags/${TAG_NAME}" 2>/dev/null || true
-
-          # Create tag and push
-          git tag -f "${TAG_NAME}"
-          git push origin HEAD:main "${TAG_NAME}"
-
-      - name: Publish @elaraai/east-c-wasm
-        if: ${{ !inputs.dry_run }}
-        working-directory: packages/east-c-wasm
-        run: npm publish --access public --provenance --tag ${{ steps.npm_tag.outputs.tag }}
-
-      - name: Create GitHub Release for east-c-wasm
-        if: ${{ !inputs.dry_run }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: east-c-wasm-${{ steps.version_wasm.outputs.new_version }}
-          name: "@elaraai/east-c-wasm ${{ steps.version_wasm.outputs.new_version }}"
-          generate_release_notes: true
-          prerelease: ${{ steps.npm_tag.outputs.prerelease == 'true' }}
-
   release:
     name: Create release
-    needs: [version, build]
+    needs: [publish, build]
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
     permissions:
@@ -317,8 +190,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.version.outputs.new_version }}
-          name: ${{ needs.version.outputs.new_version }}
+          tag_name: ${{ needs.publish.outputs.new_version }}
+          name: ${{ needs.publish.outputs.new_version }}
           generate_release_notes: true
-          prerelease: ${{ needs.version.outputs.is_prerelease == 'true' }}
+          prerelease: ${{ needs.publish.outputs.is_prerelease == 'true' }}
           files: artifacts/*
