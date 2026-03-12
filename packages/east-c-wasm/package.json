@@ -1,6 +1,6 @@
 {
     "name": "@elaraai/east-c-wasm",
-    "version": "0.1.1-beta.6",
+    "version": "0.1.1-beta.7",
     "description": "WebAssembly build of east-c for fast East IR execution",
     "main": "dist/src/index.js",
     "types": "dist/src/index.d.ts",
