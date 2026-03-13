@@ -30,6 +30,7 @@
 #include "east/env.h"
 #include "east/ir.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -98,10 +99,25 @@ typedef struct {
     EastValue *value;
 } Beast2DecSlot;
 
+/* Value dedup: identical byte ranges (under the same type) produce the same
+ * EastValue pointer.  This enables O(1) pointer-equality caching downstream
+ * (e.g. TypeCache in type_of_type.c). */
+typedef struct {
+    uint64_t hash;       /* 0 = empty slot */
+    size_t byte_start;
+    size_t byte_len;
+    EastType *type;
+    EastValue *value;
+} Beast2DedupSlot;
+
 typedef struct {
     Beast2DecSlot *slots;
     int mask;
     int count;
+    /* Struct/Variant value dedup */
+    Beast2DedupSlot *dedup_slots;
+    int dedup_mask;
+    int dedup_count;
 } Beast2DecodeCtx;
 
 static inline uint32_t hash_ptr(uintptr_t p)
@@ -189,11 +205,31 @@ static void beast2_dec_ctx_init(Beast2DecodeCtx *ctx)
     ctx->mask = 63;
     ctx->count = 0;
     ctx->slots = calloc((size_t)(ctx->mask + 1), sizeof(Beast2DecSlot));
+    ctx->dedup_mask = 255;  /* initial capacity 256 */
+    ctx->dedup_count = 0;
+    ctx->dedup_slots = calloc((size_t)(ctx->dedup_mask + 1), sizeof(Beast2DedupSlot));
 }
 
 static void beast2_dec_ctx_free(Beast2DecodeCtx *ctx)
 {
+    /* Release all backref'd values */
+    if (ctx->slots) {
+        for (int i = 0; i <= ctx->mask; i++) {
+            if (ctx->slots[i].key != 0 && ctx->slots[i].value) {
+                east_value_release(ctx->slots[i].value);
+            }
+        }
+    }
     free(ctx->slots);
+    /* Release all dedup'd values */
+    if (ctx->dedup_slots) {
+        for (int i = 0; i <= ctx->dedup_mask; i++) {
+            if (ctx->dedup_slots[i].hash != 0 && ctx->dedup_slots[i].value) {
+                east_value_release(ctx->dedup_slots[i].value);
+            }
+        }
+    }
+    free(ctx->dedup_slots);
 }
 
 static void beast2_dec_ctx_grow(Beast2DecodeCtx *ctx)
@@ -241,8 +277,99 @@ static void beast2_dec_ctx_add(Beast2DecodeCtx *ctx, EastValue *value, size_t of
     while (ctx->slots[h].key != 0)
         h = (h + 1) & (uint32_t)ctx->mask;
     ctx->slots[h].key = offset;
+    east_value_retain(value);  /* backref table owns a reference */
     ctx->slots[h].value = value;
     ctx->count++;
+}
+
+/* ================================================================== */
+/*  BEAST2 Value Dedup (byte-range based)                              */
+/* ================================================================== */
+
+static uint64_t hash_byte_range(const uint8_t *data, size_t len, uintptr_t type_ptr)
+{
+    /* O(1) fingerprint: type pointer + length + first/last 8 bytes.
+     * Collisions are handled by memcmp in beast2_dedup_find. */
+    uint64_t h = 14695981039346656037ULL;
+    h ^= type_ptr;
+    h *= 1099511628211ULL;
+    h ^= (type_ptr >> 32);
+    h *= 1099511628211ULL;
+    h ^= len;
+    h *= 1099511628211ULL;
+    if (len >= 8) {
+        uint64_t head, tail;
+        memcpy(&head, data, 8);
+        memcpy(&tail, data + len - 8, 8);
+        h ^= head;
+        h *= 1099511628211ULL;
+        h ^= tail;
+        h *= 1099511628211ULL;
+    } else {
+        for (size_t i = 0; i < len; i++) {
+            h ^= data[i];
+            h *= 1099511628211ULL;
+        }
+    }
+    return h ? h : 1;
+}
+
+static void beast2_dedup_grow(Beast2DecodeCtx *ctx)
+{
+    int old_cap = ctx->dedup_mask + 1;
+    int new_cap = old_cap * 2;
+    int new_mask = new_cap - 1;
+    Beast2DedupSlot *new_slots = calloc((size_t)new_cap, sizeof(Beast2DedupSlot));
+    if (!new_slots) return;
+
+    for (int i = 0; i < old_cap; i++) {
+        if (ctx->dedup_slots[i].hash != 0) {
+            uint32_t h = (uint32_t)(ctx->dedup_slots[i].hash) & (uint32_t)new_mask;
+            while (new_slots[h].hash != 0)
+                h = (h + 1) & (uint32_t)new_mask;
+            new_slots[h] = ctx->dedup_slots[i];
+        }
+    }
+    free(ctx->dedup_slots);
+    ctx->dedup_slots = new_slots;
+    ctx->dedup_mask = new_mask;
+}
+
+static EastValue *beast2_dedup_find(Beast2DecodeCtx *ctx, uint64_t hash,
+                                     const uint8_t *data, size_t byte_start,
+                                     size_t byte_len, EastType *type)
+{
+    uint32_t h = (uint32_t)(hash) & (uint32_t)ctx->dedup_mask;
+    for (;;) {
+        if (ctx->dedup_slots[h].hash == 0) return NULL;
+        if (ctx->dedup_slots[h].hash == hash &&
+            ctx->dedup_slots[h].byte_len == byte_len &&
+            ctx->dedup_slots[h].type == type &&
+            memcmp(data + ctx->dedup_slots[h].byte_start,
+                   data + byte_start, byte_len) == 0) {
+            return ctx->dedup_slots[h].value;
+        }
+        h = (h + 1) & (uint32_t)ctx->dedup_mask;
+    }
+}
+
+static void beast2_dedup_add(Beast2DecodeCtx *ctx, uint64_t hash,
+                              size_t byte_start, size_t byte_len,
+                              EastType *type, EastValue *value)
+{
+    if (ctx->dedup_count * 10 >= (ctx->dedup_mask + 1) * 7)
+        beast2_dedup_grow(ctx);
+
+    uint32_t h = (uint32_t)(hash) & (uint32_t)ctx->dedup_mask;
+    while (ctx->dedup_slots[h].hash != 0)
+        h = (h + 1) & (uint32_t)ctx->dedup_mask;
+    ctx->dedup_slots[h].hash = hash;
+    ctx->dedup_slots[h].byte_start = byte_start;
+    ctx->dedup_slots[h].byte_len = byte_len;
+    ctx->dedup_slots[h].type = type;
+    east_value_retain(value);  /* dedup table owns a reference */
+    ctx->dedup_slots[h].value = value;
+    ctx->dedup_count++;
 }
 
 /* ================================================================== */
@@ -663,6 +790,7 @@ static EastValue *beast2_decode_value(const uint8_t *data, size_t len,
     }
 
     case EAST_TYPE_STRUCT: {
+        size_t dedup_start = *offset;
         size_t nf = type->data.struct_.num_fields;
         const char **names = malloc(nf * sizeof(char *));
         EastValue **values = malloc(nf * sizeof(EastValue *));
@@ -686,16 +814,31 @@ static EastValue *beast2_decode_value(const uint8_t *data, size_t len,
             }
         }
 
+        /* Dedup: check if identical bytes were decoded before under this type */
+        size_t dedup_len = *offset - dedup_start;
+        uint64_t dedup_hash = hash_byte_range(data + dedup_start, dedup_len, (uintptr_t)type);
+        EastValue *cached = beast2_dedup_find(ctx, dedup_hash, data, dedup_start, dedup_len, type);
+        if (cached) {
+            for (size_t i = 0; i < nf; i++)
+                east_value_release(values[i]);
+            free(names);
+            free(values);
+            east_value_retain(cached);
+            return cached;
+        }
+
         EastValue *result = east_struct_new(names, values, nf, type);
         for (size_t i = 0; i < nf; i++) {
             east_value_release(values[i]);
         }
         free(names);
         free(values);
+        beast2_dedup_add(ctx, dedup_hash, dedup_start, dedup_len, type, result);
         return result;
     }
 
     case EAST_TYPE_VARIANT: {
+        size_t dedup_start = *offset;
         uint64_t case_idx = read_varint(data, offset);
         if (case_idx >= type->data.variant.num_cases) return NULL;
 
@@ -705,8 +848,19 @@ static EastValue *beast2_decode_value(const uint8_t *data, size_t len,
         EastValue *case_value = beast2_decode_value(data, len, offset, case_type, ctx);
         if (!case_value) return NULL;
 
+        /* Dedup: check if identical bytes were decoded before under this type */
+        size_t dedup_len = *offset - dedup_start;
+        uint64_t dedup_hash = hash_byte_range(data + dedup_start, dedup_len, (uintptr_t)type);
+        EastValue *cached = beast2_dedup_find(ctx, dedup_hash, data, dedup_start, dedup_len, type);
+        if (cached) {
+            east_value_release(case_value);
+            east_value_retain(cached);
+            return cached;
+        }
+
         EastValue *result = east_variant_new(case_name, case_value, type);
         east_value_release(case_value);
+        beast2_dedup_add(ctx, dedup_hash, dedup_start, dedup_len, type, result);
         return result;
     }
 
@@ -975,6 +1129,47 @@ EastValue *east_beast2_decode_full(const uint8_t *data, size_t len,
     if (!result) return NULL;
 
     /* 4. Verify all bytes consumed — leftover bytes indicate a type mismatch */
+    if (offset != len) {
+        east_value_release(result);
+        return NULL;
+    }
+    return result;
+}
+
+EastValue *east_beast2_decode_auto(const uint8_t *data, size_t len)
+{
+    if (!data) return NULL;
+    if (len < 8) return NULL;
+
+    /* 1. Verify magic bytes */
+    if (memcmp(data, BEAST2_MAGIC, 8) != 0) return NULL;
+
+    /* Ensure type system is initialized */
+    if (!east_type_type) east_type_of_type_init();
+
+    size_t offset = 8;
+
+    /* 2. Decode type schema and convert to EastType* */
+    Beast2DecodeCtx schema_ctx;
+    beast2_dec_ctx_init(&schema_ctx);
+    EastValue *schema_val = beast2_decode_value(data, len, &offset,
+                                                 east_type_type, &schema_ctx);
+    beast2_dec_ctx_free(&schema_ctx);
+    if (!schema_val) return NULL;
+
+    EastType *type = east_type_from_value(schema_val);
+    east_value_release(schema_val);
+    if (!type) return NULL;
+
+    /* 3. Decode value using the extracted type */
+    Beast2DecodeCtx dctx;
+    beast2_dec_ctx_init(&dctx);
+    EastValue *result = beast2_decode_value(data, len, &offset, type, &dctx);
+    beast2_dec_ctx_free(&dctx);
+    east_type_release(type);
+    if (!result) return NULL;
+
+    /* 4. Verify all bytes consumed */
     if (offset != len) {
         east_value_release(result);
         return NULL;

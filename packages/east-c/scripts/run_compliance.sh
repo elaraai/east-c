@@ -1,11 +1,11 @@
 #!/bin/bash
 # Run all compliance tests in parallel.
-# Usage: ./scripts/run_compliance.sh [test-ir-dir] [test-binary]
+# Usage: ./packages/east-c/scripts/run_compliance.sh [test-ir-dir] [test-binary]
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="${SCRIPT_DIR}/.."
+PROJECT_DIR="${SCRIPT_DIR}/../../.."
 BUILD_DIR="${PROJECT_DIR}/build"
 IR_DIR="${1:-/tmp/east-test-ir}"
 TEST_BIN="${2:-${BUILD_DIR}/packages/east-c/test_compliance}"

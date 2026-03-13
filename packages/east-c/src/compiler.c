@@ -621,6 +621,12 @@ EvalResult eval_ir(IRNode *node, Environment *env,
             }
         }
 
+        if (platform->pre_call) {
+            platform->pre_call(node->data.platform.name,
+                               node->data.platform.type_params,
+                               node->data.platform.num_type_params);
+        }
+
         EvalResult result = pfn(args, nargs);
 
         for (size_t i = 0; i < nargs; i++)

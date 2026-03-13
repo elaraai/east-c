@@ -319,6 +319,7 @@ static int cmd_run(const char *ir_path,
     struct timespec t0, t1, t2, t3, t4, t5;
 
     /* Load IR */
+    struct timespec t_decode, t_convert;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     EastValue *ir_val = load_ir(ir_path, verbose);
     if (!ir_val) {
@@ -326,8 +327,10 @@ static int cmd_run(const char *ir_path,
         builtin_registry_free(builtins);
         return 1;
     }
+    clock_gettime(CLOCK_MONOTONIC, &t_decode);
 
     IRNode *ir = east_ir_from_value(ir_val);
+    clock_gettime(CLOCK_MONOTONIC, &t_convert);
     east_value_release(ir_val);
 
     if (!ir) {
@@ -506,7 +509,8 @@ static int cmd_run(const char *ir_path,
         long peak_kb = usage.ru_maxrss;
 
         fprintf(stderr, "\nTiming:\n");
-        fprintf(stderr, "  Load IR:    %8.1f ms\n", elapsed_ms(&t0, &t1));
+        fprintf(stderr, "  Load IR:    %8.1f ms  (decode: %.1f ms, ir_from_value: %.1f ms, release: %.1f ms)\n",
+                elapsed_ms(&t0, &t1), elapsed_ms(&t0, &t_decode), elapsed_ms(&t_decode, &t_convert), elapsed_ms(&t_convert, &t1));
         fprintf(stderr, "  Compile:    %8.1f ms\n", elapsed_ms(&t1, &t2));
         fprintf(stderr, "  Execute:    %8.1f ms\n", elapsed_ms(&t2, &t3));
         fprintf(stderr, "  Output:     %8.1f ms\n", elapsed_ms(&t3, &t4));

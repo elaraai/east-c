@@ -1,21 +1,21 @@
 #!/bin/bash
-# Run all compliance tests with ASAN leak detection.
-# Usage: ./scripts/run_leak_check.sh [test-ir-dir] [test-binary-relative-path]
-#   Defaults to /tmp/east-test-ir and packages/east-c/test_compliance
+# Run profile IR files through east-c CLI with ASAN leak detection.
+# Usage: ./packages/east-c/scripts/run_profiler.sh [profile-ir-dir]
+#   Defaults to /tmp/east-profile-ir
 #
 # Builds in build-asan/ with AddressSanitizer + LeakSanitizer,
-# then runs each compliance test and reports which ones leak.
+# then runs each profile beast2/json IR file and reports results.
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="${SCRIPT_DIR}/.."
+PROJECT_DIR="${SCRIPT_DIR}/../../.."
 BUILD_DIR="${PROJECT_DIR}/build-asan"
-IR_DIR="${1:-/tmp/east-test-ir}"
-TEST_BIN="${BUILD_DIR}/${2:-packages/east-c/test_compliance}"
+IR_DIR="${1:-/tmp/east-profile-ir}"
+CLI_BIN="${BUILD_DIR}/packages/east-c-cli/east-c"
 
 # Build with ASAN if needed
-if [ ! -x "$TEST_BIN" ] || [ "${REBUILD:-}" = "1" ]; then
+if [ ! -x "$CLI_BIN" ] || [ "${REBUILD:-}" = "1" ]; then
     echo "Building with AddressSanitizer..."
     mkdir -p "$BUILD_DIR"
     cmake -S "$PROJECT_DIR" -B "$BUILD_DIR" \
@@ -27,13 +27,14 @@ if [ ! -x "$TEST_BIN" ] || [ "${REBUILD:-}" = "1" ]; then
     echo "Build complete."
 fi
 
-if [ ! -x "$TEST_BIN" ]; then
-    echo "Error: $(basename "$TEST_BIN") not found at $TEST_BIN"
+if [ ! -x "$CLI_BIN" ]; then
+    echo "Error: east-c CLI not found at $CLI_BIN"
     exit 1
 fi
 
 if [ ! -d "$IR_DIR" ]; then
-    echo "Error: IR directory not found at $IR_DIR"
+    echo "Error: Profile IR directory not found at $IR_DIR"
+    echo "Generate with: node profile_generator.js --size xlarge (writes to /tmp/east-profile-ir)"
     exit 1
 fi
 
@@ -42,16 +43,29 @@ export ASAN_OPTIONS="detect_leaks=1:exitcode=42"
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
-# Run all tests in parallel, capturing both stdout and stderr
+# Collect all beast2 and json files
+shopt -s nullglob
+IR_FILES=("$IR_DIR"/*.beast2 "$IR_DIR"/*.json)
+shopt -u nullglob
+
+if [ ${#IR_FILES[@]} -eq 0 ]; then
+    echo "Error: No .beast2 or .json files found in $IR_DIR"
+    exit 1
+fi
+
+# Run all in parallel
 PIDS=()
-FILES=()
-for f in "$IR_DIR"/*.json; do
-    name=$(basename "$f" .json)
-    outfile="$TMPDIR/$name.out"
-    errfile="$TMPDIR/$name.err"
-    (timeout 60 "$TEST_BIN" "$f" > "$outfile" 2> "$errfile"; echo "EXIT:$?" >> "$outfile") &
+NAMES=()
+for f in "${IR_FILES[@]}"; do
+    base=$(basename "$f")
+    name="${base%.*}"
+    ext="${base##*.}"
+    tag="${name}_${ext}"
+    outfile="$TMPDIR/$tag.out"
+    errfile="$TMPDIR/$tag.err"
+    (timeout 120 "$CLI_BIN" run "$f" -p std > "$outfile" 2> "$errfile"; echo "EXIT:$?" >> "$outfile") &
     PIDS+=($!)
-    FILES+=("$outfile")
+    NAMES+=("$tag")
 done
 
 # Wait for all
@@ -63,17 +77,19 @@ done
 LEAK_COUNT=0
 CLEAN_COUNT=0
 ERROR_COUNT=0
+FAIL_COUNT=0
 LEAK_SUMMARY=""
 CLEAN_SUMMARY=""
 ERROR_SUMMARY=""
+FAIL_SUMMARY=""
 
-for f in "$IR_DIR"/*.json; do
-    name=$(basename "$f" .json)
-    outfile="$TMPDIR/$name.out"
-    errfile="$TMPDIR/$name.err"
+for i in "${!NAMES[@]}"; do
+    tag="${NAMES[$i]}"
+    outfile="$TMPDIR/$tag.out"
+    errfile="$TMPDIR/$tag.err"
 
     if [ ! -f "$outfile" ]; then
-        ERROR_SUMMARY+="  MISSING  $name\n"
+        ERROR_SUMMARY+="  MISSING  $tag\n"
         ERROR_COUNT=$((ERROR_COUNT + 1))
         continue
     fi
@@ -86,11 +102,10 @@ for f in "$IR_DIR"/*.json; do
     leak_bytes=""
     if [ -f "$errfile" ] && grep -q "LeakSanitizer" "$errfile" 2>/dev/null; then
         has_leak=true
-        # Extract total leaked bytes
         leak_bytes=$(grep -oP 'SUMMARY:.*?(\d+ byte)' "$errfile" 2>/dev/null | head -1)
     fi
 
-    # Check for other ASAN errors (heap-use-after-free, etc.)
+    # Check for other ASAN errors
     has_asan_error=false
     if [ -f "$errfile" ] && grep -q "ERROR: AddressSanitizer" "$errfile" 2>/dev/null; then
         has_asan_error=true
@@ -103,19 +118,23 @@ for f in "$IR_DIR"/*.json; do
 
     if $has_asan_error && ! $has_leak; then
         asan_type=$(grep -oP 'ERROR: AddressSanitizer: \K\S+' "$errfile" 2>/dev/null | head -1)
-        ERROR_SUMMARY+="  ASAN   $name ($asan_type)\n"
+        ERROR_SUMMARY+="  ASAN   $tag ($asan_type)\n"
         ERROR_COUNT=$((ERROR_COUNT + 1))
     elif $has_leak; then
-        LEAK_SUMMARY+="  LEAK   $name ($leak_bytes)\n"
+        LEAK_SUMMARY+="  LEAK   $tag ($leak_bytes)\n"
         LEAK_COUNT=$((LEAK_COUNT + 1))
+    elif [ "$exit_code" != "0" ]; then
+        err_msg=$(grep -m1 "^Error:" "$errfile" 2>/dev/null || echo "exit=$exit_code")
+        FAIL_SUMMARY+="  FAIL   $tag ($err_msg)\n"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
     else
-        CLEAN_SUMMARY+="  CLEAN  $name\n"
+        CLEAN_SUMMARY+="  CLEAN  $tag\n"
         CLEAN_COUNT=$((CLEAN_COUNT + 1))
     fi
 done
 
 echo "========================================="
-echo "  East-C Memory Leak Check"
+echo "  East-C Profile Leak Check ($IR_DIR)"
 echo "========================================="
 echo ""
 if [ -n "$ERROR_SUMMARY" ]; then
@@ -124,10 +143,13 @@ fi
 if [ -n "$LEAK_SUMMARY" ]; then
     echo -e "$LEAK_SUMMARY" | sort
 fi
+if [ -n "$FAIL_SUMMARY" ]; then
+    echo -e "$FAIL_SUMMARY" | sort
+fi
 if [ -n "$CLEAN_SUMMARY" ]; then
     echo -e "$CLEAN_SUMMARY" | sort
 fi
 echo ""
 echo "========================================="
-echo "  Total: $CLEAN_COUNT clean, $LEAK_COUNT leaking, $ERROR_COUNT errors"
+echo "  Total: $CLEAN_COUNT clean, $LEAK_COUNT leaking, $FAIL_COUNT failed, $ERROR_COUNT errors"
 echo "========================================="

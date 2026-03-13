@@ -28,6 +28,7 @@ set(EAST_WASM_EXPORTS
     "_east_wasm_malloc"
     "_east_wasm_free_buf"
     "_east_wasm_set_platform_context"
+    "_east_wasm_invoke_fn"
     "_east_wasm_last_error"
     "_malloc"
     "_free"

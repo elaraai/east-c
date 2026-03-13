@@ -24,6 +24,9 @@ typedef struct {
 typedef struct {
     Hashmap *functions;          // name -> PlatformFunction*
     Hashmap *generic_functions;  // name -> GenericPlatformFunction*
+    /** Optional hook called before each platform function invocation.
+     *  Used by WASM bridge to set up trampoline context. */
+    void (*pre_call)(const char *name, EastType **type_params, size_t num_type_params);
 } PlatformRegistry;
 
 PlatformRegistry *platform_registry_new(void);

@@ -41,10 +41,10 @@ jobs:
         run: make build
 
       - name: Run unit tests
-        run: cd build && ctest --output-on-failure
+        run: make test
 
       - name: Run compliance tests
-        run: ./scripts/run_compliance.sh /tmp/east-test-ir
+        run: make compliance
 
   test-east-c-std:
     name: Test east-c-std
@@ -83,10 +83,10 @@ jobs:
         run: make build
 
       - name: Run unit tests
-        run: cd build && ctest --output-on-failure
+        run: make test
 
       - name: Run std compliance tests
-        run: ./scripts/run_compliance.sh /tmp/east-node-std build/packages/east-c-std/test_std_compliance
+        run: make compliance-std
 
       - name: Stop test services
         if: always()
