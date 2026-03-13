@@ -1,4 +1,4 @@
-.PHONY: build rebuild test clean install install-cli services-up services-down compliance compliance-std compliance-all leak-check leak-check-std leak-check-all setup-wasm wasm wasm-clean
+.PHONY: build rebuild test clean install install-cli services-up services-down compliance compliance-std compliance-wasm compliance-all leak-check leak-check-std leak-check-all setup-wasm wasm wasm-clean
 
 build:
 	@mkdir -p build && cd build && cmake .. && cmake --build . -j$$(nproc)
@@ -21,19 +21,22 @@ install-cli: build
 
 # Compliance tests
 compliance: build
-	@./scripts/run_compliance.sh
+	@./packages/east-c/scripts/run_compliance.sh
 
 compliance-std: build
-	@./scripts/run_compliance.sh /tmp/east-node-std build/packages/east-c-std/test_std_compliance
+	@./packages/east-c-std/scripts/test_compliance.sh
 
-compliance-all: compliance compliance-std
+compliance-wasm:
+	@./packages/east-c-wasm/scripts/run_compliance.sh
+
+compliance-all: compliance compliance-std compliance-wasm
 
 # Memory leak checks
 leak-check:
-	@./scripts/run_leak_check.sh
+	@./packages/east-c/scripts/run_leak_check.sh
 
 leak-check-std:
-	@./scripts/run_leak_check.sh /tmp/east-node-std packages/east-c-std/test_std_compliance
+	@./packages/east-c/scripts/run_leak_check.sh /tmp/east-node-std packages/east-c-std/test_std_compliance
 
 leak-check-all: leak-check leak-check-std
 

@@ -90,12 +90,9 @@ static void store_input_types(const char *name, EastType **types, size_t count) 
 /*
  * JS platform call bridge.
  *
- * Uses EM_JS with Asyncify.handleAsync for async platform functions.
- * For sync platform functions (which return a plain number), no ASYNCIFY
- * overhead is incurred.
- *
- * The actual implementation is overridden at module instantiation time
- * via moduleOpts.js_platform_call from the TypeScript wrapper.
+ * All platform functions execute synchronously. The actual implementation
+ * is overridden at module instantiation time via moduleOpts.js_platform_call
+ * from the TypeScript wrapper.
  */
 EM_JS(int, js_platform_call, (
     const char *name,
@@ -104,12 +101,8 @@ EM_JS(int, js_platform_call, (
     uint8_t *out_buf, size_t *out_len
 ), {
     if (Module.js_platform_call) {
-        var result = Module.js_platform_call(name, type_params_buf, type_params_len,
-                                              args_buf, args_len, out_buf, out_len);
-        if (result && typeof result.then === 'function') {
-            return Asyncify.handleAsync(function() { return result; });
-        }
-        return result;
+        return Module.js_platform_call(name, type_params_buf, type_params_len,
+                                        args_buf, args_len, out_buf, out_len);
     }
     /* No handler registered — write error */
     return 1;
@@ -120,6 +113,12 @@ EM_JS(int, js_platform_call, (
 
 /* Shared result buffer to avoid repeated malloc/free */
 static uint8_t *g_platform_result_buf = NULL;
+
+/* Heap-allocated result length for platform calls.
+ * MUST be on the heap (not a local variable) because the bridge writes to it
+ * AFTER ASYNCIFY unwinds the C stack. A local (on the shadow stack) would be
+ * clobbered by intervening WASM calls (e.g. invoke_fn) before the rewind. */
+static size_t *g_platform_result_len = NULL;
 
 /* ------------------------------------------------------------------ */
 /*  Generic platform function factory                                  */
@@ -186,16 +185,53 @@ static void encode_type_params(PlatformTrampoline *t) {
     byte_buffer_free(buf);
 }
 
+/* ------------------------------------------------------------------ */
+/*  Temporary handle table for function value args (bridge callbacks)  */
+/* ------------------------------------------------------------------ */
+
+#define MAX_TEMP_HANDLES 256
+static struct {
+    EastValue *fn_values[MAX_TEMP_HANDLES];
+    size_t count;
+} g_temp_handles;
+
+#define MAX_BRIDGE_DEPTH 32
+static int g_bridge_depth = 0;
+/* Stack of handle counts — saves count at each bridge entry so we can
+ * free only the handles allocated at this level when we return. */
+static size_t g_handle_stack[MAX_BRIDGE_DEPTH];
+
+static uint32_t alloc_temp_handle(EastValue *fn_val) {
+    if (g_temp_handles.count >= MAX_TEMP_HANDLES) return 0;
+    uint32_t id = 0x80000000 | (uint32_t)g_temp_handles.count;
+    east_value_retain(fn_val);
+    g_temp_handles.fn_values[g_temp_handles.count++] = fn_val;
+    return id;
+}
+
+/* Free temp handles back to a saved count */
+static void free_temp_handles_to(size_t target) {
+    while (g_temp_handles.count > target) {
+        g_temp_handles.count--;
+        east_value_release(g_temp_handles.fn_values[g_temp_handles.count]);
+        g_temp_handles.fn_values[g_temp_handles.count] = NULL;
+    }
+}
+
 /* The actual PlatformFn that all trampolines share */
 static EvalResult platform_bridge_fn(EastValue **args, size_t num_args) {
     PlatformTrampoline *t = g_current_trampoline;
     if (!t) return eval_error("platform bridge: no active trampoline");
 
+    /* Save current handle count so we can free handles from this level on return */
+    if (g_bridge_depth < MAX_BRIDGE_DEPTH) {
+        g_handle_stack[g_bridge_depth] = g_temp_handles.count;
+    }
+    g_bridge_depth++;
+
     /* Encode args as Beast2-full array */
-    /* We need the types from the IR node, but we don't have them here.
-     * Instead, encode as a Beast2-full value which includes the type header.
-     * We'll encode each arg individually and pack them into a simple format:
-     * [count][len1][beast2_full_1][len2][beast2_full_2]...
+    /* Format: [count][len1][beast2_full_1][len2][beast2_full_2]...
+     * For function-typed args: [0xFFFFFFFF][handle_id][input_count][type_len][type_bytes]
      */
     ByteBuffer *args_buf = byte_buffer_new(1024);
 
@@ -210,6 +246,36 @@ static EvalResult platform_bridge_fn(EastValue **args, size_t num_args) {
         EastType *arg_type = NULL;
         EastValue *v = args[i];
         bool type_owned = false;  /* true if we constructed a type that needs release */
+
+        /* Check if this is a function arg — pass as opaque handle instead of encoding */
+        if (declared && i < declared->num_inputs &&
+            (declared->input_types[i]->kind == EAST_TYPE_FUNCTION ||
+             declared->input_types[i]->kind == EAST_TYPE_ASYNC_FUNCTION) &&
+            v->kind == EAST_VAL_FUNCTION) {
+
+            /* Write sentinel length */
+            uint32_t sentinel = 0xFFFFFFFF;
+            byte_buffer_write_bytes(args_buf, (uint8_t *)&sentinel, 4);
+
+            /* Write handle ID */
+            uint32_t handle_id = alloc_temp_handle(v);
+            byte_buffer_write_bytes(args_buf, (uint8_t *)&handle_id, 4);
+
+            /* Write input count from declared type */
+            uint32_t input_count = (uint32_t)declared->input_types[i]->data.function.num_inputs;
+            byte_buffer_write_bytes(args_buf, (uint8_t *)&input_count, 4);
+
+            /* Write function type as Beast2-full encoded type value */
+            EastValue *type_val = east_type_to_value(declared->input_types[i]);
+            ByteBuffer *tbuf = east_beast2_encode_full(type_val, east_type_type);
+            uint32_t tlen = (uint32_t)tbuf->len;
+            byte_buffer_write_bytes(args_buf, (uint8_t *)&tlen, 4);
+            byte_buffer_write_bytes(args_buf, tbuf->data, tbuf->len);
+            byte_buffer_free(tbuf);
+            east_value_release(type_val);
+
+            continue;  /* skip normal Beast2 encoding */
+        }
 
         /* Use declared type if available, otherwise infer from value */
         if (declared && i < declared->num_inputs) {
@@ -257,16 +323,26 @@ static EvalResult platform_bridge_fn(EastValue **args, size_t num_args) {
         }
     }
 
-    /* Call JS */
-    size_t out_len = PLATFORM_RESULT_BUF_SIZE;
+    /* Call JS — use heap-allocated g_platform_result_len (not a stack local)
+     * because async bridge writes happen after ASYNCIFY unwind, and
+     * a stack local would be clobbered by intervening WASM calls. */
+    *g_platform_result_len = PLATFORM_RESULT_BUF_SIZE;
     int rc = js_platform_call(
         t->name,
         t->type_params_encoded, t->type_params_encoded_len,
         args_buf->data, args_buf->len,
-        g_platform_result_buf, &out_len
+        g_platform_result_buf, g_platform_result_len
     );
 
     byte_buffer_free(args_buf);
+
+    size_t out_len = *g_platform_result_len;
+
+    g_bridge_depth--;
+    /* Free handles allocated at this bridge level */
+    if (g_bridge_depth < MAX_BRIDGE_DEPTH) {
+        free_temp_handles_to(g_handle_stack[g_bridge_depth]);
+    }
 
     if (rc != 0) {
         /* Error: out_buf contains error message as UTF-8 */
@@ -461,9 +537,12 @@ void east_wasm_init(void) {
     east_register_all_builtins(g_builtins);
 
     g_platform_result_buf = malloc(PLATFORM_RESULT_BUF_SIZE);
+    g_platform_result_len = malloc(sizeof(size_t));
 
     memset(g_handles, 0, sizeof(g_handles));
     memset(g_trampolines, 0, sizeof(g_trampolines));
+    memset(&g_temp_handles, 0, sizeof(g_temp_handles));
+    g_bridge_depth = 0;
 
     g_initialized = 1;
 }
@@ -832,4 +911,123 @@ void east_wasm_set_platform_context(const char *name,
         east_type_release(type_params[i]);
     }
     free(type_params);
+}
+
+/*
+ * Invoke a function via its temp handle (callback from JS into WASM).
+ * Args are Beast2-full packed: [count:u32][len1:u32][data1]...
+ * Result is Beast2-full encoded into result_buf.
+ * Returns: 0 = success, 1 = error
+ */
+EMSCRIPTEN_KEEPALIVE
+int east_wasm_invoke_fn(uint32_t handle_id,
+                         const uint8_t *args_buf, size_t args_len,
+                         uint8_t *result_buf, size_t *result_len,
+                         char *error_buf, size_t *error_len) {
+    /* Resolve temp handle */
+    EastValue *fn_val = NULL;
+    if (handle_id & 0x80000000) {
+        uint32_t idx = handle_id & 0x7FFFFFFF;
+        if (idx < g_temp_handles.count)
+            fn_val = g_temp_handles.fn_values[idx];
+    }
+    if (!fn_val || fn_val->kind != EAST_VAL_FUNCTION) {
+        const char *msg = "invalid function handle";
+        size_t mlen = strlen(msg);
+        if (mlen > *error_len) mlen = *error_len;
+        memcpy(error_buf, msg, mlen);
+        *error_len = mlen;
+        *result_len = 0;
+        return 1;
+    }
+
+    EastCompiledFn *fn = fn_val->data.function.compiled;
+    if (!fn) {
+        const char *msg = "function handle has no compiled function";
+        size_t mlen = strlen(msg);
+        if (mlen > *error_len) mlen = *error_len;
+        memcpy(error_buf, msg, mlen);
+        *error_len = mlen;
+        *result_len = 0;
+        return 1;
+    }
+
+    /* Decode args from Beast2-full packed format */
+    size_t offset = 0;
+    uint32_t num_args = 0;
+    if (args_len >= 4) {
+        memcpy(&num_args, args_buf, 4);
+        offset = 4;
+    }
+
+    EastValue **args = NULL;
+    if (num_args > 0) {
+        args = calloc(num_args, sizeof(EastValue *));
+        for (uint32_t i = 0; i < num_args; i++) {
+            if (offset + 4 > args_len) break;
+            uint32_t vlen;
+            memcpy(&vlen, args_buf + offset, 4);
+            offset += 4;
+            if (offset + vlen > args_len) break;
+            args[i] = east_beast2_decode_auto(args_buf + offset, vlen);
+            offset += vlen;
+        }
+    }
+
+    EvalResult result = east_call(fn, args, num_args);
+
+    /* Release args */
+    for (uint32_t i = 0; i < num_args; i++) {
+        if (args[i]) east_value_release(args[i]);
+    }
+    free(args);
+
+    if (result.status == EVAL_ERROR) {
+        const char *msg = result.error_message ? result.error_message : "unknown error";
+        size_t mlen = strlen(msg);
+        if (mlen > *error_len) mlen = *error_len;
+        memcpy(error_buf, msg, mlen);
+        *error_len = mlen;
+        *result_len = 0;
+        eval_result_free(&result);
+        return 1;
+    }
+
+    if (!result.value || result.value->kind == EAST_VAL_NULL) {
+        *result_len = 0;
+        if (result.value) east_value_release(result.value);
+        eval_result_free(&result);
+        return 0;
+    }
+
+    /* Use the function's IR return type for encoding */
+    EastType *result_type = fn->ir->type;
+    if (!result_type) {
+        *result_len = 0;
+        east_value_release(result.value);
+        eval_result_free(&result);
+        return 0;
+    }
+
+    ByteBuffer *buf = east_beast2_encode_full(result.value, result_type);
+    if (buf->len > *result_len) {
+        const char *msg = "result buffer too small";
+        size_t mlen = strlen(msg);
+        if (mlen > *error_len) mlen = *error_len;
+        memcpy(error_buf, msg, mlen);
+        *error_len = mlen;
+        *result_len = 0;
+        byte_buffer_free(buf);
+        east_value_release(result.value);
+        eval_result_free(&result);
+        return 1;
+    }
+
+    memcpy(result_buf, buf->data, buf->len);
+    *result_len = buf->len;
+
+    byte_buffer_free(buf);
+    east_value_release(result.value);
+    eval_result_free(&result);
+    return 0;
 }

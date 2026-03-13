@@ -38,6 +38,7 @@ export interface EastWasmModule extends EmscriptenModule {
     _east_wasm_free_buf: (ptr: number) => void;
     _east_wasm_set_platform_context: (namePtr: number, tpPtr: number, tpLen: number) => void;
     _east_wasm_last_error: () => number; // returns pointer to null-terminated string, or 0
+    _east_wasm_invoke_fn: (handleId: number, argsPtr: number, argsLen: number, resultPtr: number, resultLenPtr: number, errorPtr: number, errorLenPtr: number) => number;
 }
 
 /** Result buffer size (1MB) — matches C side */
@@ -49,9 +50,9 @@ const ERROR_BUF_SIZE = 64 * 1024;
 /**
  * Platform function implementation.
  * Receives Beast2-full encoded args, returns Beast2-full encoded result (or null).
- * May return a Promise for async platform functions (requires ASYNCIFY).
+ * All platform functions execute synchronously — async is not supported in WASM.
  */
-export type PlatformFn = (args: Uint8Array[]) => Uint8Array | null | Promise<Uint8Array | null>;
+export type PlatformFn = (args: Uint8Array[]) => Uint8Array | null;
 
 /**
  * Generic platform function factory.
@@ -85,13 +86,13 @@ export interface EastWasm {
     compile(irBytes: Uint8Array): CompiledHandle;
 
     /** Execute a compiled function with no arguments. */
-    call(handle: CompiledHandle): Promise<Uint8Array | null>;
+    call(handle: CompiledHandle): Uint8Array | null;
 
     /**
      * Execute a compiled function with Beast2-full encoded arguments.
      * Args format: [count:u32le][len1:u32le][beast2_full_1]...
      */
-    callWithArgs(handle: CompiledHandle, argsBytes: Uint8Array): Promise<Uint8Array | null>;
+    callWithArgs(handle: CompiledHandle, argsBytes: Uint8Array): Uint8Array | null;
 
     /** Free a compiled function. Must be called when done. */
     free(handle: CompiledHandle): void;
@@ -185,15 +186,11 @@ export function createEastWasmFromModule(
             return handle as CompiledHandle;
         },
 
-        async call(handle: CompiledHandle): Promise<Uint8Array | null> {
+        call(handle: CompiledHandle): Uint8Array | null {
             new DataView(mod.HEAPU8.buffer, resultLenPtr, 4).setUint32(0, RESULT_BUF_SIZE, true);
             new DataView(mod.HEAPU8.buffer, errorLenPtr, 4).setUint32(0, ERROR_BUF_SIZE, true);
 
-            const rc = await mod._east_wasm_call(
-                handle,
-                resultBufPtr, resultLenPtr,
-                errorBufPtr, errorLenPtr,
-            );
+            const rc = mod._east_wasm_call(handle, resultBufPtr, resultLenPtr, errorBufPtr, errorLenPtr);
 
             if (rc !== 0) {
                 const errLen = new DataView(mod.HEAPU8.buffer, errorLenPtr, 4).getUint32(0, true);
@@ -206,17 +203,12 @@ export function createEastWasmFromModule(
             return new Uint8Array(mod.HEAPU8.buffer, resultBufPtr, resLen).slice();
         },
 
-        async callWithArgs(handle: CompiledHandle, argsBytes: Uint8Array): Promise<Uint8Array | null> {
+        callWithArgs(handle: CompiledHandle, argsBytes: Uint8Array): Uint8Array | null {
             const argsPtr = writeBytes(argsBytes);
             new DataView(mod.HEAPU8.buffer, resultLenPtr, 4).setUint32(0, RESULT_BUF_SIZE, true);
             new DataView(mod.HEAPU8.buffer, errorLenPtr, 4).setUint32(0, ERROR_BUF_SIZE, true);
 
-            const rc = await mod._east_wasm_call_with_args(
-                handle,
-                argsPtr, argsBytes.length,
-                resultBufPtr, resultLenPtr,
-                errorBufPtr, errorLenPtr,
-            );
+            const rc = mod._east_wasm_call_with_args(handle, argsPtr, argsBytes.length, resultBufPtr, resultLenPtr, errorBufPtr, errorLenPtr);
 
             mod._free(argsPtr);
 
@@ -244,19 +236,23 @@ export function createEastWasmFromModule(
 /**
  * Build the platform call bridge for Emscripten module options.
  * Must be set as `moduleOpts.js_platform_call` before module initialization.
+ *
+ * All platform functions execute synchronously. Async platform functions
+ * are not supported in WASM — use the TypeScript runtime for async operations.
  */
 export function createPlatformBridge(
     platformFns: Map<string, PlatformRegistration>,
     genericCache: Map<string, PlatformFn>,
     getMod: () => EastWasmModule,
-): (namePtr: number, tpPtr: number, tpLen: number, argsPtr: number, argsLen: number, outPtr: number, outLenPtr: number) => number | Promise<number> {
+): (namePtr: number, tpPtr: number, tpLen: number, argsPtr: number, argsLen: number, outPtr: number, outLenPtr: number) => number {
     return (
         namePtr: number,
         tpPtr: number, tpLen: number,
         argsPtr: number, argsLen: number,
         outPtr: number, outLenPtr: number,
-    ): number | Promise<number> => {
+    ): number => {
         const mod = getMod();
+
         try {
             const name = mod.UTF8ToString(namePtr);
             const reg = platformFns.get(name);
@@ -265,7 +261,7 @@ export function createPlatformBridge(
                 return 1;
             }
 
-            // Decode args from WASM memory — copy out before any async work
+            // Decode args from WASM memory
             const argsData = new Uint8Array(mod.HEAPU8.buffer, argsPtr, argsLen).slice();
             const args = decodeArgsList(argsData);
 
@@ -289,26 +285,10 @@ export function createPlatformBridge(
                 return 1;
             }
 
-            // Call the implementation
+            // Call the implementation (always synchronous)
             const result = impl(args);
 
-            // Async platform function — return a Promise so ASYNCIFY can suspend C
-            if (reg.isAsync) {
-                return Promise.resolve(result).then(
-                    (resolved) => {
-                        writeResultToWasm(mod, resolved, outPtr, outLenPtr);
-                        return 0;
-                    },
-                    (err) => {
-                        const msg = err instanceof Error ? err.message : String(err);
-                        writeErrorToWasmBridge(mod, msg, outPtr, outLenPtr);
-                        return 1;
-                    },
-                );
-            }
-
-            // Sync path
-            writeResultToWasm(mod, result as Uint8Array | null, outPtr, outLenPtr);
+            writeResultToWasm(mod, result, outPtr, outLenPtr);
             return 0;
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
@@ -346,7 +326,16 @@ function writeErrorToWasmBridge(mod: EastWasmModule, msg: string, outPtr: number
 // Helpers
 // ============================================================================
 
-/** Decode args list from the packed format: [count:u32le][len1:u32le][data1]... */
+/** Sentinel value indicating a function handle in packed args */
+const FN_HANDLE_SENTINEL = 0xFFFFFFFF;
+
+/**
+ * Decode args list from the packed format: [count:u32le][len1:u32le][data1]...
+ *
+ * When a sentinel length (0xFFFFFFFF) is encountered, the function handle header
+ * [handle_id:u32][input_count:u32][type_len:u32][type_bytes...] is packed into
+ * the Uint8Array entry so that callJsPlatformFn can detect and resolve it.
+ */
 export function decodeArgsList(data: Uint8Array): Uint8Array[] {
     if (data.length < 4) return [];
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
@@ -357,11 +346,113 @@ export function decodeArgsList(data: Uint8Array): Uint8Array[] {
         if (offset + 4 > data.length) break;
         const len = view.getUint32(offset, true);
         offset += 4;
-        if (offset + len > data.length) break;
-        args.push(data.slice(offset, offset + len));
-        offset += len;
+
+        if (len === FN_HANDLE_SENTINEL) {
+            // Function handle: pack sentinel + [handle_id][input_count][type_len][type_bytes]
+            // into a single Uint8Array so callJsPlatformFn can detect it
+            const headerStart = offset;
+            if (offset + 12 > data.length) break;
+            offset += 4; // handle_id
+            offset += 4; // input_count
+            const typeLen = view.getUint32(offset, true);
+            offset += 4; // type_len
+            if (offset + typeLen > data.length) break;
+            offset += typeLen;
+            // Pack: [sentinel:u32le][handle_id:u32le][input_count:u32le][type_len:u32le][type_bytes]
+            const packed = new Uint8Array(4 + (offset - headerStart));
+            const packedView = new DataView(packed.buffer);
+            packedView.setUint32(0, FN_HANDLE_SENTINEL, true);
+            packed.set(data.slice(headerStart, offset), 4);
+            args.push(packed);
+        } else {
+            if (offset + len > data.length) break;
+            args.push(data.slice(offset, offset + len));
+            offset += len;
+        }
     }
     return args;
+}
+
+/**
+ * Check if an arg byte array is a packed function handle (starts with sentinel).
+ */
+function isFnHandleArg(argBytes: Uint8Array): boolean {
+    if (argBytes.length < 16) return false; // sentinel(4) + handle(4) + count(4) + typeLen(4) minimum
+    const view = new DataView(argBytes.buffer, argBytes.byteOffset, argBytes.byteLength);
+    return view.getUint32(0, true) === FN_HANDLE_SENTINEL;
+}
+
+/**
+ * Parse a packed function handle arg into its components.
+ */
+function parseFnHandleArg(argBytes: Uint8Array): { handleId: number; inputCount: number; fnTypeBytes: Uint8Array } {
+    const view = new DataView(argBytes.buffer, argBytes.byteOffset, argBytes.byteLength);
+    // Skip sentinel (4 bytes)
+    const handleId = view.getUint32(4, true);
+    const inputCount = view.getUint32(8, true);
+    const typeLen = view.getUint32(12, true);
+    const fnTypeBytes = argBytes.slice(16, 16 + typeLen);
+    return { handleId, inputCount, fnTypeBytes };
+}
+
+/** Extract input/output types from a FunctionType or AsyncFunctionType value */
+function extractFnSignature(fnType: EastTypeValue): { inputs: EastTypeValue[]; output: EastTypeValue } {
+    if (fnType.type === 'Function' || fnType.type === 'AsyncFunction') {
+        return { inputs: fnType.value.inputs, output: fnType.value.output };
+    }
+    throw new Error(`extractFnSignature: unexpected type ${(fnType as { type: string }).type}`);
+}
+
+/**
+ * Create a JS wrapper around a WASM function handle.
+ * When called, Beast2-encodes args, calls _east_wasm_invoke_fn, Beast2-decodes result.
+ * Executes synchronously — no ASYNCIFY needed.
+ */
+function createFnHandleWrapper(
+    handleId: number,
+    fnType: EastTypeValue,
+    mod: EastWasmModule,
+    invokeBufs: { resultBufPtr: number; errorBufPtr: number; resultLenPtr: number; errorLenPtr: number },
+): (...args: unknown[]) => unknown {
+    const { inputs, output } = extractFnSignature(fnType);
+
+    return (...jsArgs: unknown[]): unknown => {
+        // Beast2-encode each arg
+        const encodedArgs: Uint8Array[] = jsArgs.map((arg, i) => {
+            const inputType = inputs[i];
+            if (!inputType) throw new Error(`invoke_fn: no input type for arg ${i}`);
+            return encodeBeast2For(inputType)(arg);
+        });
+        const packedArgs = encodeArgsList(encodedArgs);
+
+        // Write args to WASM memory
+        const argsPtr = mod._malloc(packedArgs.length);
+        mod.HEAPU8.set(packedArgs, argsPtr);
+
+        // Set up result/error buffers
+        new DataView(mod.HEAPU8.buffer, invokeBufs.resultLenPtr, 4).setUint32(0, RESULT_BUF_SIZE, true);
+        new DataView(mod.HEAPU8.buffer, invokeBufs.errorLenPtr, 4).setUint32(0, ERROR_BUF_SIZE, true);
+
+        const rc = mod._east_wasm_invoke_fn(
+            handleId, argsPtr, packedArgs.length,
+            invokeBufs.resultBufPtr, invokeBufs.resultLenPtr,
+            invokeBufs.errorBufPtr, invokeBufs.errorLenPtr,
+        );
+
+        mod._free(argsPtr);
+
+        if (rc !== 0) {
+            const errLen = new DataView(mod.HEAPU8.buffer, invokeBufs.errorLenPtr, 4).getUint32(0, true);
+            const errBytes = new Uint8Array(mod.HEAPU8.buffer, invokeBufs.errorBufPtr, errLen);
+            throw new Error(new TextDecoder().decode(errBytes));
+        }
+
+        const resLen = new DataView(mod.HEAPU8.buffer, invokeBufs.resultLenPtr, 4).getUint32(0, true);
+        if (resLen === 0) return null;
+
+        const resultBytes = new Uint8Array(mod.HEAPU8.buffer, invokeBufs.resultBufPtr, resLen).slice();
+        return decodeBeast2For(output)(resultBytes);
+    };
 }
 
 /** Encode args list into the packed format: [count:u32le][len1:u32le][data1]... */
@@ -407,6 +498,25 @@ export function registerPlatformFunctions(wasm: EastWasm, platform: PlatformFunc
     }
 }
 
+/**
+ * Handle resolver: provides module + invoke buffers for creating function handle wrappers.
+ * Set by the loader (index.ts / browser.ts) after module initialization.
+ */
+let _handleResolver: { mod: EastWasmModule; invokeBufs: { resultBufPtr: number; errorBufPtr: number; resultLenPtr: number; errorLenPtr: number } } | null = null;
+
+/** Set the handle resolver. Called once after module init. */
+export function setHandleResolver(mod: EastWasmModule): void {
+    _handleResolver = {
+        mod,
+        invokeBufs: {
+            resultBufPtr: mod._malloc(RESULT_BUF_SIZE),
+            errorBufPtr: mod._malloc(ERROR_BUF_SIZE),
+            resultLenPtr: mod._malloc(4),
+            errorLenPtr: mod._malloc(4),
+        },
+    };
+}
+
 function buildPlatformRegistrations(allPlatform: PlatformFunction[]): PlatformRegistration[] {
     return allPlatform.map(pf => {
         const isGeneric = (pf.type_parameters?.length ?? 0) > 0;
@@ -422,7 +532,7 @@ function buildPlatformRegistrations(allPlatform: PlatformFunction[]): PlatformRe
                     const inputTypes = pf.inputsFn ? pf.inputsFn(...typeParams) : pf.inputs;
                     const outputType = pf.outputsFn ? pf.outputsFn(...typeParams) : pf.output;
                     const jsFn = pf.fn(...typeParams);
-                    return (args: Uint8Array[]) => callJsPlatformFn(jsFn, inputTypes, outputType, args, allPlatform, isAsync);
+                    return (args: Uint8Array[]) => callJsPlatformFn(jsFn, inputTypes, outputType, args, allPlatform);
                 },
             };
         }
@@ -434,7 +544,7 @@ function buildPlatformRegistrations(allPlatform: PlatformFunction[]): PlatformRe
             name: pf.name,
             isGeneric: false,
             isAsync,
-            fn: (args: Uint8Array[]) => callJsPlatformFn(pf.fn, pf.inputs, pf.output, args, allPlatform, isAsync),
+            fn: (args: Uint8Array[]) => callJsPlatformFn(pf.fn, pf.inputs, pf.output, args, allPlatform),
             inputTypesBytes,
         };
     });
@@ -442,7 +552,15 @@ function buildPlatformRegistrations(allPlatform: PlatformFunction[]): PlatformRe
 
 /**
  * Bridge between WASM Beast2-encoded bytes and JS platform function implementations.
- * Returns a Promise for async platform functions, synchronous result otherwise.
+ * All platform functions execute synchronously.
+ *
+ * When an arg's bytes start with the function handle sentinel (0xFFFFFFFF),
+ * it is resolved to a JS callable wrapper instead of Beast2-decoded.
+ *
+ * For async platform functions: East's asyncPlatform.implement() wraps NullType-
+ * returning functions in an async wrapper that returns a Promise. Since WASM
+ * executes synchronously, side effects (including function handle callbacks)
+ * already ran. We discard the return value for async platforms.
  */
 function callJsPlatformFn(
     fn: (...args: unknown[]) => unknown,
@@ -450,23 +568,30 @@ function callJsPlatformFn(
     outputType: EastTypeValue,
     args: Uint8Array[],
     allPlatform?: PlatformFunction[],
-    isAsync?: boolean,
-): Uint8Array | null | Promise<Uint8Array | null> {
+): Uint8Array | null {
     const decodeOptions = allPlatform ? { platform: allPlatform } : undefined;
     const decoded = args.map((argBytes, i) => {
+        // Check for function handle sentinel
+        if (isFnHandleArg(argBytes) && _handleResolver) {
+            const { handleId, fnTypeBytes } = parseFnHandleArg(argBytes);
+            const fnType = decodeBeast2For(EastTypeType)(fnTypeBytes) as EastTypeValue;
+            return createFnHandleWrapper(handleId, fnType, _handleResolver.mod, _handleResolver.invokeBufs);
+        }
         const decoder = decodeBeast2For(inputTypes[i]!, decodeOptions);
         return decoder(argBytes);
     });
     const result = fn(...decoded);
 
-    if (isAsync) {
-        return Promise.resolve(result).then((resolved) => {
-            if (resolved === null || resolved === undefined) return null;
-            const encoder = encodeBeast2For(outputType);
-            return encoder(resolved);
-        });
+    // For NullType output, return null immediately. This handles async platform
+    // functions whose implement() wraps in async and returns a Promise — the side
+    // effects already ran synchronously, so we discard the return value.
+    // Silence any rejection on the dangling Promise to prevent unhandled rejection errors.
+    if (outputType.type === 'Null') {
+        if (result != null && typeof (result as any).catch === 'function') {
+            (result as Promise<unknown>).catch(() => {});
+        }
+        return null;
     }
-
     if (result === null || result === undefined) return null;
     const encoder = encodeBeast2For(outputType);
     return encoder(result);

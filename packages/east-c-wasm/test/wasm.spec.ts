@@ -19,6 +19,7 @@ import {
     StructType,
     VariantType,
     RecursiveType,
+    FunctionType,
     variant,
     decodeBeast2,
     decodeBeast2For,
@@ -33,7 +34,7 @@ import { registerPlatformFunctions, encodeArgsList } from '../src/common.js';
 const encodeIR = encodeBeast2For(IRType);
 
 /** Helper: compile an East function to Beast2-full IR bytes */
-function toIRBytes(fn: ReturnType<typeof East.function>): Uint8Array {
+function toIRBytes(fn: ReturnType<typeof East.function> | ReturnType<typeof East.asyncFunction>): Uint8Array {
     const ir = fn.toIR().ir;
     return encodeIR(ir);
 }
@@ -204,7 +205,7 @@ describe('east-c-wasm', async () => {
         const irBytes = toIRBytes(fn);
         const handle = wasm.compile(irBytes);
 
-        await assert.rejects(
+        assert.throws(
             () => wasm.call(handle),
             (err: Error) => {
                 assert.ok(err.message.includes('east-c-wasm'), `error should be from east-c-wasm: ${err.message}`);
@@ -785,6 +786,63 @@ describe('east-c-wasm', async () => {
         const decoded = decodeBeast2(result);
         // sum of 0..9999 = 49995000
         assert.equal(decoded.value, 49995000n);
+        wasm.free(handle);
+    });
+
+    await test('platform function — receives and calls function arg', async () => {
+        // Register a platform function that receives a function and calls it
+        const applyFn = East.platform("test_apply_fn",
+            [IntegerType, FunctionType([IntegerType], IntegerType)],
+            IntegerType,
+        );
+
+        registerPlatformFunctions(wasm, [
+            applyFn.implement((x: bigint, body: (n: bigint) => bigint) => {
+                return body(x);
+            }),
+        ]);
+
+        // East program: call test_apply_fn(10, fn(x) => x * 3)
+        const fn = East.function([], IntegerType, ($) => {
+            const triple = $.const(
+                East.function([IntegerType], IntegerType, ($, x) => x.multiply(3n)),
+            );
+            return applyFn(10n, triple);
+        });
+
+        const irBytes = toIRBytes(fn);
+        const handle = wasm.compile(irBytes);
+        const result = await wasm.call(handle);
+        assert.ok(result, 'should return a result');
+
+        const decoded = decodeBeast2(result);
+        assert.equal(decoded.value, 30n);
+        wasm.free(handle);
+    });
+
+    await test('platform function — function arg with captures', async () => {
+        // Reuse test_apply_fn from above
+        const applyFn = East.platform("test_apply_fn",
+            [IntegerType, FunctionType([IntegerType], IntegerType)],
+            IntegerType,
+        );
+
+        // East program: capture a multiplier, pass closure to platform fn
+        const fn = East.function([], IntegerType, ($) => {
+            const multiplier = $.const(7n, IntegerType);
+            const multiplyBy = $.const(
+                East.function([IntegerType], IntegerType, ($, x) => x.multiply(multiplier)),
+            );
+            return applyFn(5n, multiplyBy);
+        });
+
+        const irBytes = toIRBytes(fn);
+        const handle = wasm.compile(irBytes);
+        const result = await wasm.call(handle);
+        assert.ok(result, 'should return a result');
+
+        const decoded = decodeBeast2(result);
+        assert.equal(decoded.value, 35n);
         wasm.free(handle);
     });
 

@@ -26,6 +26,7 @@ import {
     type PlatformRegistration,
     createEastWasmFromModule,
     createPlatformBridge,
+    setHandleResolver,
 } from './common.js';
 
 // Re-export all types from common
@@ -66,6 +67,9 @@ export async function createEastWasm(options?: EastWasmOptions): Promise<EastWas
     };
 
     mod = await createModule(moduleOpts);
+
+    // Enable function handle resolution for the bridge
+    setHandleResolver(mod);
 
     // Pass shared platform maps so bridge and API use the same registry
     return createEastWasmFromModule(mod, { platformFns, genericCache });
