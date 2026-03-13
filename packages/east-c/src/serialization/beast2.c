@@ -118,6 +118,11 @@ typedef struct {
     Beast2DedupSlot *dedup_slots;
     int dedup_mask;
     int dedup_count;
+    /* Backreference tracking: incremented when a backref is resolved.
+     * Struct/Variant dedup is unsafe when backrefs were used because
+     * backreference distances are relative to buffer position, so
+     * identical bytes at different positions resolve to different targets. */
+    int backref_count;
 } Beast2DecodeCtx;
 
 static inline uint32_t hash_ptr(uintptr_t p)
@@ -208,6 +213,7 @@ static void beast2_dec_ctx_init(Beast2DecodeCtx *ctx)
     ctx->dedup_mask = 255;  /* initial capacity 256 */
     ctx->dedup_count = 0;
     ctx->dedup_slots = calloc((size_t)(ctx->dedup_mask + 1), sizeof(Beast2DedupSlot));
+    ctx->backref_count = 0;
 }
 
 static void beast2_dec_ctx_free(Beast2DecodeCtx *ctx)
@@ -707,6 +713,7 @@ static EastValue *beast2_decode_value(const uint8_t *data, size_t len,
             size_t ref_off = pre_offset - distance;
             EastValue *ref = beast2_dec_ctx_find(ctx, ref_off);
             if (ref) {
+                ctx->backref_count++;
                 east_value_retain(ref);
                 return ref;
             }
@@ -737,7 +744,7 @@ static EastValue *beast2_decode_value(const uint8_t *data, size_t len,
         if (distance > 0) {
             size_t ref_off = pre_offset - distance;
             EastValue *ref = beast2_dec_ctx_find(ctx, ref_off);
-            if (ref) { east_value_retain(ref); return ref; }
+            if (ref) { ctx->backref_count++; east_value_retain(ref); return ref; }
             return NULL;
         }
         size_t content_off = *offset;
@@ -764,7 +771,7 @@ static EastValue *beast2_decode_value(const uint8_t *data, size_t len,
         if (distance > 0) {
             size_t ref_off = pre_offset - distance;
             EastValue *ref = beast2_dec_ctx_find(ctx, ref_off);
-            if (ref) { east_value_retain(ref); return ref; }
+            if (ref) { ctx->backref_count++; east_value_retain(ref); return ref; }
             return NULL;
         }
         size_t content_off = *offset;
@@ -791,6 +798,7 @@ static EastValue *beast2_decode_value(const uint8_t *data, size_t len,
 
     case EAST_TYPE_STRUCT: {
         size_t dedup_start = *offset;
+        int backref_before = ctx->backref_count;
         size_t nf = type->data.struct_.num_fields;
         const char **names = malloc(nf * sizeof(char *));
         EastValue **values = malloc(nf * sizeof(EastValue *));
@@ -814,17 +822,23 @@ static EastValue *beast2_decode_value(const uint8_t *data, size_t len,
             }
         }
 
-        /* Dedup: check if identical bytes were decoded before under this type */
+        /* Dedup: check if identical bytes were decoded before under this type.
+         * Skip dedup if any backreferences were resolved during field decoding,
+         * because backref distances are relative to buffer position — identical
+         * bytes at different positions would resolve to different targets. */
+        int had_backref = (ctx->backref_count != backref_before);
         size_t dedup_len = *offset - dedup_start;
         uint64_t dedup_hash = hash_byte_range(data + dedup_start, dedup_len, (uintptr_t)type);
-        EastValue *cached = beast2_dedup_find(ctx, dedup_hash, data, dedup_start, dedup_len, type);
-        if (cached) {
-            for (size_t i = 0; i < nf; i++)
-                east_value_release(values[i]);
-            free(names);
-            free(values);
-            east_value_retain(cached);
-            return cached;
+        if (!had_backref) {
+            EastValue *cached = beast2_dedup_find(ctx, dedup_hash, data, dedup_start, dedup_len, type);
+            if (cached) {
+                for (size_t i = 0; i < nf; i++)
+                    east_value_release(values[i]);
+                free(names);
+                free(values);
+                east_value_retain(cached);
+                return cached;
+            }
         }
 
         EastValue *result = east_struct_new(names, values, nf, type);
@@ -833,12 +847,14 @@ static EastValue *beast2_decode_value(const uint8_t *data, size_t len,
         }
         free(names);
         free(values);
-        beast2_dedup_add(ctx, dedup_hash, dedup_start, dedup_len, type, result);
+        if (!had_backref)
+            beast2_dedup_add(ctx, dedup_hash, dedup_start, dedup_len, type, result);
         return result;
     }
 
     case EAST_TYPE_VARIANT: {
         size_t dedup_start = *offset;
+        int backref_before = ctx->backref_count;
         uint64_t case_idx = read_varint(data, offset);
         if (case_idx >= type->data.variant.num_cases) return NULL;
 
@@ -848,19 +864,24 @@ static EastValue *beast2_decode_value(const uint8_t *data, size_t len,
         EastValue *case_value = beast2_decode_value(data, len, offset, case_type, ctx);
         if (!case_value) return NULL;
 
-        /* Dedup: check if identical bytes were decoded before under this type */
+        /* Dedup: check if identical bytes were decoded before under this type.
+         * Skip when backreferences were resolved (same reason as struct). */
+        int had_backref = (ctx->backref_count != backref_before);
         size_t dedup_len = *offset - dedup_start;
         uint64_t dedup_hash = hash_byte_range(data + dedup_start, dedup_len, (uintptr_t)type);
-        EastValue *cached = beast2_dedup_find(ctx, dedup_hash, data, dedup_start, dedup_len, type);
-        if (cached) {
-            east_value_release(case_value);
-            east_value_retain(cached);
-            return cached;
+        if (!had_backref) {
+            EastValue *cached = beast2_dedup_find(ctx, dedup_hash, data, dedup_start, dedup_len, type);
+            if (cached) {
+                east_value_release(case_value);
+                east_value_retain(cached);
+                return cached;
+            }
         }
 
         EastValue *result = east_variant_new(case_name, case_value, type);
         east_value_release(case_value);
-        beast2_dedup_add(ctx, dedup_hash, dedup_start, dedup_len, type, result);
+        if (!had_backref)
+            beast2_dedup_add(ctx, dedup_hash, dedup_start, dedup_len, type, result);
         return result;
     }
 
@@ -871,7 +892,7 @@ static EastValue *beast2_decode_value(const uint8_t *data, size_t len,
         if (distance > 0) {
             size_t ref_off = pre_offset - distance;
             EastValue *ref = beast2_dec_ctx_find(ctx, ref_off);
-            if (ref) { east_value_retain(ref); return ref; }
+            if (ref) { ctx->backref_count++; east_value_retain(ref); return ref; }
             return NULL;
         }
         size_t content_off = *offset;

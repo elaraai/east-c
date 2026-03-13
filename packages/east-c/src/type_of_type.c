@@ -944,9 +944,11 @@ static EastValue *literal_from_value(EastValue *v)
     if (strcmp(tag, "Boolean") == 0)  return east_boolean(payload->data.boolean);
     if (strcmp(tag, "Integer") == 0)  return east_integer(payload->data.integer);
     if (strcmp(tag, "Float") == 0)    return east_float(payload->data.float64);
-    if (strcmp(tag, "String") == 0)   return east_string_len(payload->data.string.data, payload->data.string.len);
+    if (strcmp(tag, "String") == 0)
+        return east_string_len(payload->data.string.data, payload->data.string.len);
     if (strcmp(tag, "DateTime") == 0) return east_datetime(payload->data.datetime);
-    if (strcmp(tag, "Blob") == 0)     return east_blob(payload->data.blob.data, payload->data.blob.len);
+    if (strcmp(tag, "Blob") == 0)
+        return east_blob(payload->data.blob.data, payload->data.blob.len);
 
     return east_null();
 }

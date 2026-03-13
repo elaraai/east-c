@@ -35,7 +35,7 @@ make compliance-all                            # both
 ./build/packages/east-c/test_compliance /tmp/east-test-ir/Array.json
 ```
 
-Current status: **918 passed, 0 failed, 0 crashed** (out of 49 IR files)
+Current status: **1601 passed, 0 failed, 0 crashed** (out of 51 IR files, with Beast2 round-trip)
 
 ## Architecture
 
