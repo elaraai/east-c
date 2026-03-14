@@ -132,6 +132,11 @@ size_t east_dict_len(EastValue *dict);
 
 EastValue *east_struct_new(const char **names, EastValue **values, size_t count, EastType *type);
 EastValue *east_struct_get_field(EastValue *s, const char *name);
+static inline EastValue *east_struct_get_field_idx(EastValue *s, size_t idx) {
+    return (s && s->kind == EAST_VAL_STRUCT && idx < s->data.struct_.num_fields)
+        ? s->data.struct_.field_values[idx]
+        : NULL;
+}
 
 EastValue *east_variant_new(const char *case_name, EastValue *value, EastType *type);
 

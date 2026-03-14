@@ -22,7 +22,7 @@ import {
 } from './common.js';
 
 export type { EastWasm, EastWasmOptions, PlatformFn, PlatformRegistration };
-export type { CompiledHandle, GenericPlatformFactory, EastWasmModule } from './common.js';
+export type { CompiledHandle, CompiledValue, GenericPlatformFactory, EastWasmModule } from './common.js';
 export { registerPlatformFunctions } from './common.js';
 
 /**
