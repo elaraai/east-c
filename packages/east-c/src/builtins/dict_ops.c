@@ -11,6 +11,12 @@
 
 /* Key type for error messages, set by factories from type_params[0] (K) */
 static _Thread_local EastType *s_dict_key_type = NULL;
+static _Thread_local EastType *_option_ctx = NULL;
+static EastType *_make_option_type(EastType *inner) {
+    const char *names[] = {"none", "some"};
+    EastType *types[] = {&east_null_type, inner};
+    return east_variant_type(names, types, 2);
+}
 
 /* Helper: format a "Dict does not contain key <key>" error message */
 static void dict_key_not_found_error(EastValue *key) {
@@ -91,9 +97,9 @@ static EastValue *dict_try_get_impl(EastValue **args, size_t n) {
     (void)n;
     if (east_dict_has(args[0], args[1])) {
         EastValue *val = east_dict_get(args[0], args[1]);
-        return east_variant_new("some", val, NULL);
+        return east_variant_new("some", val, _option_ctx);
     }
-    return east_variant_new("none", east_null(), NULL);
+    return east_variant_new("none", east_null(), _option_ctx);
 }
 
 static EastValue *dict_insert_impl(EastValue **args, size_t n) {
@@ -416,7 +422,7 @@ static EastValue *dict_filter_map_impl(EastValue **args, size_t n) {
         EastValue *call_args[] = { d->data.dict.values[i], d->data.dict.keys[i] };
         EastValue *opt = call_fn(fn, call_args, 2);
         if (!opt) { east_value_release(result); return NULL; }
-        if (opt->kind == EAST_VAL_VARIANT && strcmp(opt->data.variant.case_name, "some") == 0)
+        if (opt->kind == EAST_VAL_VARIANT && strcmp(east_variant_case_name(opt), "some") == 0)
             east_dict_set(result, d->data.dict.keys[i], opt->data.variant.value);
         east_value_release(opt);
     }
@@ -431,11 +437,11 @@ static EastValue *dict_first_map_impl(EastValue **args, size_t n) {
         EastValue *call_args[] = { d->data.dict.values[i], d->data.dict.keys[i] };
         EastValue *opt = call_fn(fn, call_args, 2);
         if (!opt) return NULL;
-        if (opt->kind == EAST_VAL_VARIANT && strcmp(opt->data.variant.case_name, "some") == 0)
+        if (opt->kind == EAST_VAL_VARIANT && strcmp(east_variant_case_name(opt), "some") == 0)
             return opt;
         east_value_release(opt);
     }
-    return east_variant_new("none", east_null(), NULL);
+    return east_variant_new("none", east_null(), _option_ctx);
 }
 
 static EastValue *dict_map_reduce_impl(EastValue **args, size_t n) {
@@ -660,7 +666,11 @@ DICT_KEY_FACTORY(dict_delete_factory, dict_delete_impl)
 DICT_KEY_FACTORY(dict_pop_factory, dict_pop_impl)
 #undef DICT_KEY_FACTORY
 static BuiltinImpl dict_get_or_default_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_get_or_default_impl; }
-static BuiltinImpl dict_try_get_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_try_get_impl; }
+static BuiltinImpl dict_try_get_factory(EastType **tp, size_t ntp) {
+    if (_option_ctx) east_type_release(_option_ctx);
+    _option_ctx = (ntp > 1) ? _make_option_type(tp[1]) : NULL; /* tp[0]=K, tp[1]=V */
+    return dict_try_get_impl;
+}
 static BuiltinImpl dict_get_or_insert_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_get_or_insert_impl; }
 static BuiltinImpl dict_insert_or_update_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_insert_or_update_impl; }
 static BuiltinImpl dict_merge_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return dict_merge_impl; }

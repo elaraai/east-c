@@ -519,7 +519,7 @@ TEST(variant_create) {
     EastValue *v = east_variant_new("Some", inner, NULL);
     ASSERT(v != NULL);
     ASSERT_EQ_INT(v->kind, EAST_VAL_VARIANT);
-    ASSERT_EQ_STR(v->data.variant.case_name, "Some");
+    ASSERT_EQ_STR(east_variant_case_name(v), "Some");
     ASSERT(v->data.variant.value != NULL);
     ASSERT_EQ_INT(v->data.variant.value->data.integer, 42);
     east_value_release(inner);

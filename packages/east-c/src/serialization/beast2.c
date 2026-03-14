@@ -647,14 +647,10 @@ static void visit_type_positions(EastValue *value, EastType *type,
         break;
     case EAST_TYPE_VARIANT:
         if (value->kind == EAST_VAL_VARIANT) {
-            const char *cn = value->data.variant.case_name;
-            for (size_t i = 0; i < type->data.variant.num_cases; i++) {
-                if (strcmp(type->data.variant.cases[i].name, cn) == 0) {
-                    visit_type_positions(value->data.variant.value,
-                                         type->data.variant.cases[i].type, target, cb, ctx);
-                    break;
-                }
-            }
+            size_t ci = value->data.variant.case_idx;
+            if (ci < type->data.variant.num_cases)
+                visit_type_positions(value->data.variant.value,
+                                     type->data.variant.cases[ci].type, target, cb, ctx);
         }
         break;
     case EAST_TYPE_ARRAY:
@@ -713,24 +709,19 @@ static EastValue *transform_type_positions(EastValue *value, EastType *type,
     }
     case EAST_TYPE_VARIANT: {
         if (value->kind != EAST_VAL_VARIANT) { east_value_retain(value); return value; }
-        const char *cn = value->data.variant.case_name;
-        for (size_t i = 0; i < type->data.variant.num_cases; i++) {
-            if (strcmp(type->data.variant.cases[i].name, cn) == 0) {
-                EastValue *new_val = transform_type_positions(
-                    value->data.variant.value, type->data.variant.cases[i].type,
-                    target, transform, ctx);
-                if (new_val == value->data.variant.value) {
-                    east_value_release(new_val);
-                    east_value_retain(value);
-                    return value;
-                }
-                EastValue *result = east_variant_new(cn, new_val, value->data.variant.type);
-                east_value_release(new_val);
-                return result;
-            }
+        size_t ci = value->data.variant.case_idx;
+        if (ci >= type->data.variant.num_cases) { east_value_retain(value); return value; }
+        EastValue *new_val = transform_type_positions(
+            value->data.variant.value, type->data.variant.cases[ci].type,
+            target, transform, ctx);
+        if (new_val == value->data.variant.value) {
+            east_value_release(new_val);
+            east_value_retain(value);
+            return value;
         }
-        east_value_retain(value);
-        return value;
+        EastValue *result = east_variant_new_idx(ci, new_val, value->data.variant.type);
+        east_value_release(new_val);
+        return result;
     }
     case EAST_TYPE_ARRAY: {
         if (value->kind != EAST_VAL_ARRAY) { east_value_retain(value); return value; }
@@ -825,14 +816,10 @@ static void pre_scan_for_functions(EastValue *value, EastType *type,
         break;
     case EAST_TYPE_VARIANT:
         if (value->kind == EAST_VAL_VARIANT) {
-            const char *cn = value->data.variant.case_name;
-            for (size_t i = 0; i < type->data.variant.num_cases; i++) {
-                if (strcmp(type->data.variant.cases[i].name, cn) == 0) {
-                    pre_scan_for_functions(value->data.variant.value,
-                                           type->data.variant.cases[i].type, table);
-                    break;
-                }
-            }
+            size_t ci = value->data.variant.case_idx;
+            if (ci < type->data.variant.num_cases)
+                pre_scan_for_functions(value->data.variant.value,
+                                       type->data.variant.cases[ci].type, table);
         }
         break;
     case EAST_TYPE_ARRAY:
@@ -999,15 +986,11 @@ static void beast2_encode_value(ByteBuffer *buf, EastValue *value,
     }
 
     case EAST_TYPE_VARIANT: {
-        const char *case_name = value->data.variant.case_name;
-        for (size_t i = 0; i < type->data.variant.num_cases; i++) {
-            if (strcmp(type->data.variant.cases[i].name, case_name) == 0) {
-                write_varint(buf, (uint64_t)i);
-                beast2_encode_value(buf, value->data.variant.value,
-                                    type->data.variant.cases[i].type, ctx);
-                break;
-            }
-        }
+        size_t ci = value->data.variant.case_idx;
+        write_varint(buf, (uint64_t)ci);
+        if (ci < type->data.variant.num_cases)
+            beast2_encode_value(buf, value->data.variant.value,
+                                type->data.variant.cases[ci].type, ctx);
         break;
     }
 
@@ -1399,7 +1382,6 @@ static EastValue *beast2_decode_value(const uint8_t *data, size_t len,
         uint64_t case_idx = read_varint(data, offset);
         if (case_idx >= type->data.variant.num_cases) return NULL;
 
-        const char *case_name = type->data.variant.cases[case_idx].name;
         EastType *case_type = type->data.variant.cases[case_idx].type;
 
         EastValue *case_value = beast2_decode_value(data, len, offset, case_type, ctx);
@@ -1443,7 +1425,7 @@ static EastValue *beast2_decode_value(const uint8_t *data, size_t len,
         ctx->dedup_misses++;
 #endif
 
-        EastValue *result = east_variant_new(case_name, case_value, type);
+        EastValue *result = east_variant_new_idx((size_t)case_idx, case_value, type);
         east_value_release(case_value);
 #ifndef BEAST2_NO_DEDUP
         if (!had_backref)

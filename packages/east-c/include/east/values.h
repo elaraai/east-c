@@ -73,9 +73,10 @@ struct EastValue {
             EastType *type;
         } struct_;
         struct {
-            char *case_name;
             EastValue *value;
             EastType *type;
+            size_t case_idx;        /* index into type->data.variant.cases[] (SIZE_MAX if unknown) */
+            const char *case_tag;   /* NOT owned — points into type's cases or string literal */
         } variant;
         struct {
             EastValue *value;
@@ -139,6 +140,14 @@ static inline EastValue *east_struct_get_field_idx(EastValue *s, size_t idx) {
 }
 
 EastValue *east_variant_new(const char *case_name, EastValue *value, EastType *type);
+EastValue *east_variant_new_idx(size_t case_idx, EastValue *value, EastType *type);
+
+/* Get the case name. Returns "" if not set. */
+static inline const char *east_variant_case_name(EastValue *v) {
+    if (v && v->kind == EAST_VAL_VARIANT && v->data.variant.case_tag)
+        return v->data.variant.case_tag;
+    return "";
+}
 
 EastValue *east_ref_new(EastValue *value);
 EastValue *east_ref_get(EastValue *ref);

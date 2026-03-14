@@ -139,7 +139,7 @@ static const char *config_get_string(EastValue *config, const char *field)
     if (!config || config->kind != EAST_VAL_STRUCT) return NULL;
     EastValue *v = east_struct_get_field(config, field);
     if (!v || v->kind != EAST_VAL_VARIANT) return NULL;
-    if (strcmp(v->data.variant.case_name, "some") != 0) return NULL;
+    if (strcmp(east_variant_case_name(v), "some") != 0) return NULL;
     EastValue *inner = v->data.variant.value;
     if (!inner || inner->kind != EAST_VAL_STRING) return NULL;
     return inner->data.string.data;
@@ -151,7 +151,7 @@ static bool config_get_bool(EastValue *config, const char *field, bool def)
     if (!config || config->kind != EAST_VAL_STRUCT) return def;
     EastValue *v = east_struct_get_field(config, field);
     if (!v || v->kind != EAST_VAL_VARIANT) return def;
-    if (strcmp(v->data.variant.case_name, "some") != 0) return def;
+    if (strcmp(east_variant_case_name(v), "some") != 0) return def;
     EastValue *inner = v->data.variant.value;
     if (!inner || inner->kind != EAST_VAL_BOOLEAN) return def;
     return inner->data.boolean;
@@ -164,7 +164,7 @@ static EastValue *config_get_dict(EastValue *config, const char *field)
     if (!config || config->kind != EAST_VAL_STRUCT) return NULL;
     EastValue *v = east_struct_get_field(config, field);
     if (!v || v->kind != EAST_VAL_VARIANT) return NULL;
-    if (strcmp(v->data.variant.case_name, "some") != 0) return NULL;
+    if (strcmp(east_variant_case_name(v), "some") != 0) return NULL;
     EastValue *inner = v->data.variant.value;
     if (!inner || inner->kind != EAST_VAL_DICT) return NULL;
     return inner;
@@ -196,7 +196,7 @@ static int config_get_null_strings(EastValue *config, const char ***out)
     if (!config || config->kind != EAST_VAL_STRUCT) return -1;
     EastValue *v = east_struct_get_field(config, "nullStrings");
     if (!v || v->kind != EAST_VAL_VARIANT) return -1;
-    if (strcmp(v->data.variant.case_name, "some") != 0) return -1;
+    if (strcmp(east_variant_case_name(v), "some") != 0) return -1;
     EastValue *arr = v->data.variant.value;
     if (!arr || arr->kind != EAST_VAL_ARRAY) return -1;
     size_t n = arr->data.array.len;
@@ -357,7 +357,7 @@ static void csv_encode_field(CsvBuf *sb, EastValue *value, EastType *type,
     /* Handle Option types: unwrap some, output nullString for none */
     if (is_option_type(type)) {
         if (value->kind == EAST_VAL_VARIANT) {
-            if (strcmp(value->data.variant.case_name, "none") == 0) {
+            if (strcmp(east_variant_case_name(value), "none") == 0) {
                 csvbuf_append_str(sb, opts->null_string);
                 return;
             }

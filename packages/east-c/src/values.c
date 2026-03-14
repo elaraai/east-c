@@ -547,13 +547,42 @@ EastValue *east_struct_get_field(EastValue *s, const char *name) {
 
 EastValue *east_variant_new(const char *case_name, EastValue *value,
                             EastType *type) {
+    /* Look up case index by name (unwrap Recursive if needed) */
+    size_t idx = SIZE_MAX;
+    const char *tag = case_name; /* default: caller's string (not owned) */
+    EastType *vt = type;
+    while (vt && vt->kind == EAST_TYPE_RECURSIVE) vt = vt->data.recursive.node;
+    if (case_name && vt && vt->kind == EAST_TYPE_VARIANT) {
+        for (size_t i = 0; i < vt->data.variant.num_cases; i++) {
+            if (strcmp(vt->data.variant.cases[i].name, case_name) == 0) {
+                idx = i;
+                tag = vt->data.variant.cases[i].name; /* point into type's storage */
+                break;
+            }
+        }
+    }
     EastValue *v = alloc_value(EAST_VAL_VARIANT);
     if (!v) return NULL;
-    v->data.variant.case_name = east_strdup(case_name ? case_name : "");
-    if (!v->data.variant.case_name) {
-        east_free(v);
-        return NULL;
-    }
+    v->data.variant.case_idx = idx;
+    v->data.variant.case_tag = tag;
+    v->data.variant.value = value;
+    if (value) east_value_retain(value);
+    v->data.variant.type = type;
+    if (type) east_type_retain(type);
+    return v;
+}
+
+EastValue *east_variant_new_idx(size_t case_idx, EastValue *value,
+                                EastType *type) {
+    EastValue *v = alloc_value(EAST_VAL_VARIANT);
+    if (!v) return NULL;
+    v->data.variant.case_idx = case_idx;
+    /* Look up tag from type */
+    EastType *vt = type;
+    while (vt && vt->kind == EAST_TYPE_RECURSIVE) vt = vt->data.recursive.node;
+    v->data.variant.case_tag = (vt && vt->kind == EAST_TYPE_VARIANT &&
+                                 case_idx < vt->data.variant.num_cases)
+        ? vt->data.variant.cases[case_idx].name : "";
     v->data.variant.value = value;
     if (value) east_value_retain(value);
     v->data.variant.type = type;
@@ -718,7 +747,6 @@ void east_value_release(EastValue *v) {
         break;
 
     case EAST_VAL_VARIANT:
-        free(v->data.variant.case_name);
         east_value_release(v->data.variant.value);
         if (v->data.variant.type)
             east_type_release(v->data.variant.type);
@@ -835,8 +863,7 @@ bool east_value_equal(EastValue *a, EastValue *b) {
         return true;
 
     case EAST_VAL_VARIANT:
-        if (strcmp(a->data.variant.case_name,
-                   b->data.variant.case_name) != 0)
+        if (strcmp(east_variant_case_name(a), east_variant_case_name(b)) != 0)
             return false;
         return east_value_equal(a->data.variant.value, b->data.variant.value);
 
@@ -1034,7 +1061,7 @@ int east_value_compare(EastValue *a, EastValue *b) {
     }
 
     case EAST_VAL_VARIANT: {
-        int c = strcmp(a->data.variant.case_name, b->data.variant.case_name);
+        int c = strcmp(east_variant_case_name(a), east_variant_case_name(b));
         if (c != 0) return (c < 0) ? -1 : 1;
         return east_value_compare(a->data.variant.value,
                                   b->data.variant.value);
@@ -1211,8 +1238,9 @@ static int print_value(EastValue *v, char *buf, size_t buf_size, int pos) {
     }
 
     case EAST_VAL_VARIANT: {
-        pos += buf_append(buf, buf_size, pos, ".%s",
-                          v->data.variant.case_name);
+        const char *cn = east_variant_case_name(v);
+        pos += buf_append(buf, buf_size, pos, ".%s", cn);
+        /* (debug removed) */
         if (v->data.variant.value &&
             v->data.variant.value->kind != EAST_VAL_NULL) {
             pos += buf_append(buf, buf_size, pos, " ");

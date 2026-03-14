@@ -213,7 +213,7 @@ EvalResult eval_ir(IRNode *node, Environment *env,
             return eval_error("match expression is not a variant");
         }
 
-        const char *case_name = val->data.variant.case_name;
+        const char *case_name = east_variant_case_name(val);
         EastValue *inner = val->data.variant.value;
 
         for (size_t i = 0; i < node->data.match.num_cases; i++) {

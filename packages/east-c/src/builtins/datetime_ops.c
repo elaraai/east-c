@@ -165,7 +165,7 @@ static EastValue *datetime_print_format_impl(EastValue **args, size_t n) {
 
     for (size_t i = 0; i < tokens->data.array.len; i++) {
         EastValue *tok = tokens->data.array.items[i];
-        const char *ttype = tok->data.variant.case_name;
+        const char *ttype = east_variant_case_name(tok);
         char tmp[32];
 
         if (strcmp(ttype, "year4") == 0) {
@@ -306,7 +306,7 @@ static EastValue *datetime_parse_format_impl(EastValue **args, size_t n) {
 
     for (size_t i = 0; i < tokens->data.array.len; i++) {
         EastValue *tok = tokens->data.array.items[i];
-        const char *ttype = tok->data.variant.case_name;
+        const char *ttype = east_variant_case_name(tok);
 
         if (strcmp(ttype, "year4") == 0) {
             int v; if (!parse_digits(input, ilen, pos, 4, &v))

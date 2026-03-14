@@ -489,18 +489,15 @@ static void print_val(PBuf *sb, EastValue *value, EastType *type, PrintContext *
             pbuf_append_str(sb, "null");
             break;
         }
-        const char *case_name = value->data.variant.case_name;
-        if (!case_name) {
+        size_t ci = value->data.variant.case_idx;
+        const char *case_name = east_variant_case_name(value);
+        if (!case_name || !*case_name) {
             pbuf_append_str(sb, "null");
             break;
         }
-        EastType *case_type = NULL;
-        for (size_t i = 0; i < type->data.variant.num_cases; i++) {
-            if (strcmp(type->data.variant.cases[i].name, case_name) == 0) {
-                case_type = type->data.variant.cases[i].type;
-                break;
-            }
-        }
+        EastType *case_type = (ci < type->data.variant.num_cases)
+            ? type->data.variant.cases[ci].type : NULL;
+        /* (debug removed) */
 
         pbuf_append_char(sb, '.');
         pbuf_append_str(sb, case_name);

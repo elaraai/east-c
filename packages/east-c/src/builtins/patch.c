@@ -82,7 +82,7 @@ static EastValue *mk_patch_v(EastValue *inner) {
 
 static bool is_tag(EastValue *v, const char *tag) {
     return v && v->kind == EAST_VAL_VARIANT &&
-           strcmp(v->data.variant.case_name, tag) == 0;
+           strcmp(east_variant_case_name(v), tag) == 0;
 }
 
 static EastValue *patch_payload(EastValue *v) {
@@ -385,8 +385,8 @@ static EastValue *diff_struct(EastValue *before, EastValue *after, EastType *typ
 static EastValue *diff_variant(EastValue *before, EastValue *after, EastType *type) {
     if (east_value_equal(before, after)) return mk_unchanged();
 
-    const char *btag = before->data.variant.case_name;
-    const char *atag = after->data.variant.case_name;
+    const char *btag = east_variant_case_name(before);
+    const char *atag = east_variant_case_name(after);
 
     if (strcmp(btag, atag) != 0)
         return mk_replace(before, after);
@@ -493,7 +493,7 @@ static EastValue *apply_array(EastValue *base, EastValue *patch_val, EastType *t
         int64_t offset = offset_v ? offset_v->data.integer : 0;
         int64_t pos = idx + offset;
 
-        const char *op_tag = op->data.variant.case_name;
+        const char *op_tag = east_variant_case_name(op);
         if (strcmp(op_tag, "delete") == 0) {
             if (pos >= 0 && (size_t)pos < result->data.array.len) {
                 /* Remove element at pos */
@@ -551,7 +551,7 @@ static EastValue *apply_set(EastValue *base, EastValue *patch_val, EastType *typ
     for (size_t i = 0; i < patch_val->data.dict.len; i++) {
         EastValue *key = patch_val->data.dict.keys[i];
         EastValue *op = patch_val->data.dict.values[i];
-        const char *tag = op->data.variant.case_name;
+        const char *tag = east_variant_case_name(op);
         if (strcmp(tag, "delete") == 0) {
             /* Remove key from result set */
             for (size_t j = 0; j < result->data.set.len; j++) {
@@ -588,7 +588,7 @@ static EastValue *apply_dict(EastValue *base, EastValue *patch_val, EastType *ty
     for (size_t i = 0; i < patch_val->data.dict.len; i++) {
         EastValue *key = patch_val->data.dict.keys[i];
         EastValue *op = patch_val->data.dict.values[i];
-        const char *tag = op->data.variant.case_name;
+        const char *tag = east_variant_case_name(op);
 
         if (strcmp(tag, "delete") == 0) {
             /* Remove key — rebuild without it */
@@ -646,7 +646,7 @@ static EastValue *apply_struct(EastValue *base, EastValue *patch_val, EastType *
 
 static EastValue *apply_variant(EastValue *base, EastValue *patch_val, EastType *type) {
     /* patch_val is a variant(caseName, casePatch) */
-    const char *case_name = patch_val->data.variant.case_name;
+    const char *case_name = east_variant_case_name(patch_val);
     EastValue *case_patch = patch_val->data.variant.value;
 
     /* Find case type */
@@ -768,8 +768,8 @@ static EastValue *compose_struct(EastValue *first, EastValue *second, EastType *
 }
 
 static EastValue *compose_variant(EastValue *first, EastValue *second, EastType *type) {
-    const char *c1 = first->data.variant.case_name;
-    const char *c2 = second->data.variant.case_name;
+    const char *c1 = east_variant_case_name(first);
+    const char *c2 = east_variant_case_name(second);
     if (strcmp(c1, c2) != 0) {
         /* Different cases — can't compose structurally */
         east_builtin_error("Cannot compose patches for different variant cases");
@@ -853,8 +853,8 @@ static EastValue *compose_dict(EastValue *first, EastValue *second, EastType *ty
             continue;
         }
 
-        const char *t1 = op1->data.variant.case_name;
-        const char *t2 = op2->data.variant.case_name;
+        const char *t1 = east_variant_case_name(op1);
+        const char *t2 = east_variant_case_name(op2);
 
         if (strcmp(t1, "insert") == 0 && strcmp(t2, "delete") == 0) {
             /* Cancel out — don't add */
@@ -1008,7 +1008,7 @@ static EastValue *invert_array(EastValue *patch_val, EastType *type) {
         EastValue *key_v = east_struct_get_field(entry, "key");
         EastValue *offset_v = east_struct_get_field(entry, "offset");
         EastValue *op = east_struct_get_field(entry, "operation");
-        const char *tag = op->data.variant.case_name;
+        const char *tag = east_variant_case_name(op);
 
         EastValue *new_op;
         if (strcmp(tag, "delete") == 0) {
@@ -1040,7 +1040,7 @@ static EastValue *invert_set(EastValue *patch_val, EastType *type) {
     for (size_t i = 0; i < patch_val->data.dict.len; i++) {
         EastValue *key = patch_val->data.dict.keys[i];
         EastValue *op = patch_val->data.dict.values[i];
-        const char *tag = op->data.variant.case_name;
+        const char *tag = east_variant_case_name(op);
         EastValue *new_op;
         if (strcmp(tag, "delete") == 0) {
             new_op = east_variant_new("insert", east_null(), NULL);
@@ -1068,7 +1068,7 @@ static EastValue *invert_dict(EastValue *patch_val, EastType *type) {
     for (size_t i = 0; i < patch_val->data.dict.len; i++) {
         EastValue *key = patch_val->data.dict.keys[i];
         EastValue *op = patch_val->data.dict.values[i];
-        const char *tag = op->data.variant.case_name;
+        const char *tag = east_variant_case_name(op);
         EastValue *new_op;
         if (strcmp(tag, "delete") == 0) {
             new_op = east_variant_new("insert", op->data.variant.value, NULL);
@@ -1119,7 +1119,7 @@ static EastValue *invert_struct(EastValue *patch_val, EastType *type) {
 }
 
 static EastValue *invert_variant(EastValue *patch_val, EastType *type) {
-    const char *case_name = patch_val->data.variant.case_name;
+    const char *case_name = east_variant_case_name(patch_val);
     EastType *case_type = NULL;
     for (size_t i = 0; i < type->data.variant.num_cases; i++) {
         if (strcmp(type->data.variant.cases[i].name, case_name) == 0) {

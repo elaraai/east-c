@@ -223,11 +223,9 @@ static void gc_destroy_contents(EastValue *v) {
         break;
 
     case EAST_VAL_VARIANT:
-        free(v->data.variant.case_name);
         east_value_release(v->data.variant.value);
         if (v->data.variant.type)
             east_type_release(v->data.variant.type);
-        v->data.variant.case_name = NULL;
         v->data.variant.value = NULL;
         break;
 

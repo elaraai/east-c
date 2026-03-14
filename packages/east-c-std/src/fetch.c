@@ -223,7 +223,7 @@ static EvalResult fetch_request(EastValue **args, size_t num_args) {
     EastValue *body_val = east_struct_get_field(config, "body");
 
     const char *url = url_val->data.string.data;
-    const char *method = method_val->data.variant.case_name;
+    const char *method = east_variant_case_name(method_val);
 
     CURL *curl = curl_easy_init();
     if (!curl) {
@@ -272,7 +272,7 @@ static EvalResult fetch_request(EastValue **args, size_t num_args) {
 
     /* Set body if present (variant: some/none) */
     if (body_val && body_val->kind == EAST_VAL_VARIANT) {
-        if (strcmp(body_val->data.variant.case_name, "some") == 0 &&
+        if (strcmp(east_variant_case_name(body_val), "some") == 0 &&
             body_val->data.variant.value != NULL) {
             const char *body_data = body_val->data.variant.value->data.string.data;
             size_t body_len = body_val->data.variant.value->data.string.len;

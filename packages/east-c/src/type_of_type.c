@@ -492,25 +492,50 @@ static EastType *rec_ctx_pop(RecCtx *ctx, EastType *inner) {
     }
 }
 
+/* EastTypeType case indices (alphabetically sorted by east_variant_type) */
+enum {
+    TT_ARRAY = 0, TT_ASYNC_FUNCTION = 1, TT_BLOB = 2, TT_BOOLEAN = 3,
+    TT_DATETIME = 4, TT_DICT = 5, TT_FLOAT = 6, TT_FUNCTION = 7,
+    TT_INTEGER = 8, TT_MATRIX = 9, TT_NEVER = 10, TT_NULL = 11,
+    TT_RECURSIVE = 12, TT_REF = 13, TT_SET = 14, TT_STRING = 15,
+    TT_STRUCT = 16, TT_VARIANT = 17, TT_VECTOR = 18
+};
+
+/* IRType case indices (alphabetically sorted by east_variant_type) */
+enum {
+    IR_As = 0, IR_Assign = 1, IR_AsyncFunction = 2, IR_Block = 3,
+    IR_Break = 4, IR_Builtin = 5, IR_Call = 6, IR_CallAsync = 7,
+    IR_Continue = 8, IR_Error = 9, IR_ForArray = 10, IR_ForDict = 11,
+    IR_ForSet = 12, IR_Function = 13, IR_GetField = 14, IR_IfElse = 15,
+    IR_Let = 16, IR_Match = 17, IR_NewArray = 18, IR_NewDict = 19,
+    IR_NewMatrix = 20, IR_NewRef = 21, IR_NewSet = 22, IR_NewVector = 23,
+    IR_Platform = 24, IR_Return = 25, IR_Struct = 26, IR_TryCatch = 27,
+    IR_UnwrapRecursive = 28, IR_Value = 29, IR_Variable = 30,
+    IR_Variant = 31, IR_While = 32, IR_WrapRecursive = 33
+};
+
 static EastType *east_type_from_value_ctx(EastValue *v, RecCtx *ctx)
 {
     if (!v || v->kind != EAST_VAL_VARIANT) return NULL;
 
-    const char *tag = v->data.variant.case_name;
+    size_t ci = v->data.variant.case_idx;
     EastValue *payload = v->data.variant.value;
 
     /* Primitive types (payload is null) */
-    if (strcmp(tag, "Never") == 0)    return &east_never_type;
-    if (strcmp(tag, "Null") == 0)     return &east_null_type;
-    if (strcmp(tag, "Boolean") == 0)  return &east_boolean_type;
-    if (strcmp(tag, "Integer") == 0)  return &east_integer_type;
-    if (strcmp(tag, "Float") == 0)    return &east_float_type;
-    if (strcmp(tag, "String") == 0)   return &east_string_type;
-    if (strcmp(tag, "DateTime") == 0) return &east_datetime_type;
-    if (strcmp(tag, "Blob") == 0)     return &east_blob_type;
+    switch (ci) {
+    case TT_NEVER:    return &east_never_type;
+    case TT_NULL:     return &east_null_type;
+    case TT_BOOLEAN:  return &east_boolean_type;
+    case TT_INTEGER:  return &east_integer_type;
+    case TT_FLOAT:    return &east_float_type;
+    case TT_STRING:   return &east_string_type;
+    case TT_DATETIME: return &east_datetime_type;
+    case TT_BLOB:     return &east_blob_type;
+    default: break;
+    }
 
     /* Container types with element: payload is the element type (variant) */
-    if (strcmp(tag, "Array") == 0) {
+    if (ci == TT_ARRAY) {
         rec_ctx_push(ctx);
         EastType *elem = east_type_from_value_ctx(payload, ctx);
         if (!elem) return rec_ctx_pop(ctx, NULL);
@@ -518,7 +543,7 @@ static EastType *east_type_from_value_ctx(EastValue *v, RecCtx *ctx)
         if (elem->ref_count > 0) east_type_release(elem);
         return rec_ctx_pop(ctx, t);
     }
-    if (strcmp(tag, "Set") == 0) {
+    if (ci == TT_SET) {
         rec_ctx_push(ctx);
         EastType *elem = east_type_from_value_ctx(payload, ctx);
         if (!elem) return rec_ctx_pop(ctx, NULL);
@@ -526,7 +551,7 @@ static EastType *east_type_from_value_ctx(EastValue *v, RecCtx *ctx)
         if (elem->ref_count > 0) east_type_release(elem);
         return rec_ctx_pop(ctx, t);
     }
-    if (strcmp(tag, "Ref") == 0) {
+    if (ci == TT_REF) {
         rec_ctx_push(ctx);
         EastType *elem = east_type_from_value_ctx(payload, ctx);
         if (!elem) return rec_ctx_pop(ctx, NULL);
@@ -534,7 +559,7 @@ static EastType *east_type_from_value_ctx(EastValue *v, RecCtx *ctx)
         if (elem->ref_count > 0) east_type_release(elem);
         return rec_ctx_pop(ctx, t);
     }
-    if (strcmp(tag, "Vector") == 0) {
+    if (ci == TT_VECTOR) {
         rec_ctx_push(ctx);
         EastType *elem = east_type_from_value_ctx(payload, ctx);
         if (!elem) return rec_ctx_pop(ctx, NULL);
@@ -542,7 +567,7 @@ static EastType *east_type_from_value_ctx(EastValue *v, RecCtx *ctx)
         if (elem->ref_count > 0) east_type_release(elem);
         return rec_ctx_pop(ctx, t);
     }
-    if (strcmp(tag, "Matrix") == 0) {
+    if (ci == TT_MATRIX) {
         rec_ctx_push(ctx);
         EastType *elem = east_type_from_value_ctx(payload, ctx);
         if (!elem) return rec_ctx_pop(ctx, NULL);
@@ -552,7 +577,7 @@ static EastType *east_type_from_value_ctx(EastValue *v, RecCtx *ctx)
     }
 
     /* Dict: payload is struct {key: type, value: type} */
-    if (strcmp(tag, "Dict") == 0) {
+    if (ci == TT_DICT) {
         rec_ctx_push(ctx);
         EastValue *key_v = east_struct_get_field_idx(payload, KV_KEY);
         EastValue *val_v = east_struct_get_field_idx(payload, KV_VALUE);
@@ -570,7 +595,7 @@ static EastType *east_type_from_value_ctx(EastValue *v, RecCtx *ctx)
     }
 
     /* Struct: payload is array of {name: String, type: type} */
-    if (strcmp(tag, "Struct") == 0) {
+    if (ci == TT_STRUCT) {
         if (!payload || payload->kind != EAST_VAL_ARRAY) return NULL;
         rec_ctx_push(ctx);
         size_t n = payload->data.array.len;
@@ -593,7 +618,7 @@ static EastType *east_type_from_value_ctx(EastValue *v, RecCtx *ctx)
     }
 
     /* Variant: payload is array of {name: String, type: type} */
-    if (strcmp(tag, "Variant") == 0) {
+    if (ci == TT_VARIANT) {
         if (!payload || payload->kind != EAST_VAL_ARRAY) return NULL;
         rec_ctx_push(ctx);
         size_t n = payload->data.array.len;
@@ -616,7 +641,7 @@ static EastType *east_type_from_value_ctx(EastValue *v, RecCtx *ctx)
     }
 
     /* Function / AsyncFunction: payload is struct {inputs: [type], output: type} */
-    if (strcmp(tag, "Function") == 0 || strcmp(tag, "AsyncFunction") == 0) {
+    if (ci == TT_FUNCTION || ci == TT_ASYNC_FUNCTION) {
         rec_ctx_push(ctx);
         EastValue *inputs_v = east_struct_get_field_idx(payload, FN_INPUTS);
         EastValue *output_v = east_struct_get_field_idx(payload, FN_OUTPUT);
@@ -627,7 +652,7 @@ static EastType *east_type_from_value_ctx(EastValue *v, RecCtx *ctx)
         }
         EastType *output = east_type_from_value_ctx(output_v, ctx);
         EastType *t;
-        if (strcmp(tag, "AsyncFunction") == 0) {
+        if (ci == TT_ASYNC_FUNCTION) {
             t = east_async_function_type(inputs, ni, output);
         } else {
             t = east_function_type(inputs, ni, output);
@@ -642,7 +667,7 @@ static EastType *east_type_from_value_ctx(EastValue *v, RecCtx *ctx)
 
     /* Recursive(N): self-reference to the compound type at depth - N.
      * Resolve to the speculative wrapper at that position. */
-    if (strcmp(tag, "Recursive") == 0) {
+    if (ci == TT_RECURSIVE) {
         if (payload && payload->kind == EAST_VAL_INTEGER) {
             int target = ctx->depth - (int)payload->data.integer;
             if (target >= 0 && target < ctx->depth && ctx->wrappers[target]) {
@@ -1076,7 +1101,7 @@ static EastType *type_field(EastValue *s)
 static EastValue *literal_from_value(EastValue *v)
 {
     if (!v || v->kind != EAST_VAL_VARIANT) return east_null();
-    const char *tag = v->data.variant.case_name;
+    const char *tag = east_variant_case_name(v);
     EastValue *payload = v->data.variant.value;
 
     if (strcmp(tag, "Null") == 0)     return east_null();
@@ -1210,14 +1235,15 @@ static IRNode *convert_ir(EastValue *v)
 {
     if (!v || v->kind != EAST_VAL_VARIANT) return NULL;
 
-    const char *tag = v->data.variant.case_name;
+    size_t ci = v->data.variant.case_idx;
+    const char *tag = east_variant_case_name(v);  /* kept for AsyncFunction strcmp */
     EastValue *s = v->data.variant.value; /* struct payload */
     EastType *type = type_field(s);
     IRNode *result = NULL;
 
     /* ----- Value ----- */
     /* Value: { type, location, value } — field 2 = value */
-    if (strcmp(tag, "Value") == 0) {
+    if (ci == IR_Value) {
         EastValue *lit = literal_from_value(get_field_idx(s, 2));
         result = with_loc(ir_value(type, lit), s);
         east_value_release(lit); /* ir_value retained it */
@@ -1226,7 +1252,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- Variable ----- */
     /* Variable: { type, location, name, mutable, captured } */
-    if (strcmp(tag, "Variable") == 0) {
+    if (ci == IR_Variable) {
         result = with_loc(ir_variable(type, get_str_idx(s, VAR_NAME),
                            get_bool_idx(s, VAR_MUTABLE), get_bool_idx(s, VAR_CAPTURED)), s);
         goto cleanup;
@@ -1234,7 +1260,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- Let ----- */
     /* Let: { type, location, variable, value } — 2=variable, 3=value */
-    if (strcmp(tag, "Let") == 0) {
+    if (ci == IR_Let) {
         EastValue *var_v = get_field_idx(s, 2);
         IRVariable var = var_from_ir_value(var_v);
         IRNode *val = convert_ir(get_field_idx(s, 3));
@@ -1246,7 +1272,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- Assign ----- */
     /* Assign: { type, location, variable, value } — 2=variable, 3=value */
-    if (strcmp(tag, "Assign") == 0) {
+    if (ci == IR_Assign) {
         EastValue *var_v = get_field_idx(s, 2);
         const char *name = "";
         if (var_v && var_v->kind == EAST_VAL_VARIANT) {
@@ -1261,14 +1287,14 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- As (type cast - pass through) ----- */
     /* As: { type, location, value } — 2=value */
-    if (strcmp(tag, "As") == 0) {
+    if (ci == IR_As) {
         result = convert_ir(get_field_idx(s, 2));
         goto cleanup;
     }
 
     /* ----- Block ----- */
     /* Block: { type, location, statements } — 2=statements */
-    if (strcmp(tag, "Block") == 0) {
+    if (ci == IR_Block) {
         size_t n;
         IRNode **stmts = convert_ir_array(get_field_idx(s, 2), &n);
         result = with_loc(ir_block(type, stmts, n), s);
@@ -1278,7 +1304,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- IfElse ----- */
     /* IfElse: { type, location, ifs, else_body } — 2=ifs, 3=else_body */
-    if (strcmp(tag, "IfElse") == 0) {
+    if (ci == IR_IfElse) {
         EastValue *ifs = get_field_idx(s, 2);
         IRNode *else_body = convert_ir(get_field_idx(s, 3));
 
@@ -1305,7 +1331,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- Match ----- */
     /* Match: { type, location, variant, cases } — 2=variant, 3=cases */
-    if (strcmp(tag, "Match") == 0) {
+    if (ci == IR_Match) {
         IRNode *expr = convert_ir(get_field_idx(s, 2));
         EastValue *cases_v = get_field_idx(s, 3);
         size_t nc = cases_v ? cases_v->data.array.len : 0;
@@ -1333,7 +1359,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- While ----- */
     /* While: { type, location, predicate, label, body } — 2=predicate, 3=label, 4=body */
-    if (strcmp(tag, "While") == 0) {
+    if (ci == IR_While) {
         IRNode *cond = convert_ir(get_field_idx(s, 2));
         IRNode *body = convert_ir(get_field_idx(s, 4));
         const char *label = label_from_value(get_field_idx(s, 3));
@@ -1345,7 +1371,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- ForArray ----- */
     /* ForArray: { type, location, array, label, key, value, body } — 2=array, 3=label, 4=key, 5=value, 6=body */
-    if (strcmp(tag, "ForArray") == 0) {
+    if (ci == IR_ForArray) {
         IRNode *arr = convert_ir(get_field_idx(s, 2));
         IRNode *body = convert_ir(get_field_idx(s, 6));
         const char *label = label_from_value(get_field_idx(s, 3));
@@ -1367,7 +1393,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- ForSet ----- */
     /* ForSet: { type, location, set, label, key, body } — 2=set, 3=label, 4=key, 5=body */
-    if (strcmp(tag, "ForSet") == 0) {
+    if (ci == IR_ForSet) {
         IRNode *set = convert_ir(get_field_idx(s, 2));
         IRNode *body = convert_ir(get_field_idx(s, 5));
         const char *label = label_from_value(get_field_idx(s, 3));
@@ -1384,7 +1410,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- ForDict ----- */
     /* ForDict: { type, location, dict, label, key, value, body } — 2=dict, 3=label, 4=key, 5=value, 6=body */
-    if (strcmp(tag, "ForDict") == 0) {
+    if (ci == IR_ForDict) {
         IRNode *dict = convert_ir(get_field_idx(s, 2));
         IRNode *body = convert_ir(get_field_idx(s, 6));
         const char *label = label_from_value(get_field_idx(s, 3));
@@ -1406,7 +1432,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- Function / AsyncFunction ----- */
     /* Function: { type, location, captures, parameters, body } — 2=captures, 3=parameters, 4=body */
-    if (strcmp(tag, "Function") == 0 || strcmp(tag, "AsyncFunction") == 0) {
+    if (ci == IR_Function || ci == IR_AsyncFunction) {
         EastValue *caps_v = get_field_idx(s, 2);
         EastValue *params_v = get_field_idx(s, 3);
         IRNode *body = convert_ir(get_field_idx(s, 4));
@@ -1424,7 +1450,7 @@ static IRNode *convert_ir(EastValue *v)
             params[i] = var_from_ir_value(params_v->data.array.items[i]);
         }
 
-        if (strcmp(tag, "AsyncFunction") == 0) {
+        if (ci == TT_ASYNC_FUNCTION) {
             result = with_loc(ir_async_function(type, captures, nc, params, np, body), s);
         } else {
             result = with_loc(ir_function(type, captures, nc, params, np, body), s);
@@ -1442,11 +1468,11 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- Call / CallAsync ----- */
     /* Call: { type, location, function, arguments } — 2=function, 3=arguments */
-    if (strcmp(tag, "Call") == 0 || strcmp(tag, "CallAsync") == 0) {
+    if (ci == IR_Call || ci == IR_CallAsync) {
         IRNode *func = convert_ir(get_field_idx(s, 2));
         size_t n;
         IRNode **args = convert_ir_array(get_field_idx(s, 3), &n);
-        if (strcmp(tag, "CallAsync") == 0) {
+        if (ci == IR_CallAsync) {
             result = with_loc(ir_call_async(type, func, args, n), s);
         } else {
             result = with_loc(ir_call(type, func, args, n), s);
@@ -1458,7 +1484,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- Platform ----- */
     /* Platform: { type, location, name, type_parameters, arguments, async, optional } — 2=name, 3=tp, 4=args, 5=async, 6=optional */
-    if (strcmp(tag, "Platform") == 0) {
+    if (ci == IR_Platform) {
         const char *name = get_str_idx(s, 2);
         bool is_async = get_bool_idx(s, 5);
         bool is_optional = get_bool_idx(s, 6);
@@ -1473,7 +1499,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- Builtin ----- */
     /* Builtin: { type, location, builtin, type_parameters, arguments } — 2=builtin, 3=tp, 4=args */
-    if (strcmp(tag, "Builtin") == 0) {
+    if (ci == IR_Builtin) {
         const char *name = get_str_idx(s, 2);
         size_t ntp, nargs;
         EastType **tp = convert_type_array(get_field_idx(s, 3), &ntp);
@@ -1486,7 +1512,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- Return ----- */
     /* Return: { type, location, value } — 2=value */
-    if (strcmp(tag, "Return") == 0) {
+    if (ci == IR_Return) {
         IRNode *val = convert_ir(get_field_idx(s, 2));
         result = with_loc(ir_return(type, val), s);
         ir_node_release(val);
@@ -1495,7 +1521,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- Break ----- */
     /* Break: { type, location, label } — 2=label */
-    if (strcmp(tag, "Break") == 0) {
+    if (ci == IR_Break) {
         const char *label = label_from_value(get_field_idx(s, 2));
         result = with_loc(ir_break(label), s);
         goto cleanup;
@@ -1503,7 +1529,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- Continue ----- */
     /* Continue: { type, location, label } — 2=label */
-    if (strcmp(tag, "Continue") == 0) {
+    if (ci == IR_Continue) {
         const char *label = label_from_value(get_field_idx(s, 2));
         result = with_loc(ir_continue(label), s);
         goto cleanup;
@@ -1511,7 +1537,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- Error ----- */
     /* Error: { type, location, message } — 2=message */
-    if (strcmp(tag, "Error") == 0) {
+    if (ci == IR_Error) {
         IRNode *msg = convert_ir(get_field_idx(s, 2));
         result = with_loc(ir_error(type, msg), s);
         ir_node_release(msg);
@@ -1520,7 +1546,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- TryCatch ----- */
     /* TryCatch: { type, location, try_body, catch_body, message, stack, finally_body } — 2=try, 3=catch, 4=msg, 5=stack, 6=finally */
-    if (strcmp(tag, "TryCatch") == 0) {
+    if (ci == IR_TryCatch) {
         IRNode *try_body = convert_ir(get_field_idx(s, 2));
         IRNode *catch_body = convert_ir(get_field_idx(s, 3));
         EastValue *msg_v = get_field_idx(s, 4);
@@ -1544,7 +1570,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- NewArray ----- */
     /* NewArray: { type, location, values } — 2=values */
-    if (strcmp(tag, "NewArray") == 0) {
+    if (ci == IR_NewArray) {
         size_t n;
         IRNode **items = convert_ir_array(get_field_idx(s, 2), &n);
         result = with_loc(ir_new_array(type, items, n), s);
@@ -1554,7 +1580,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- NewSet ----- */
     /* NewSet: { type, location, values } — 2=values */
-    if (strcmp(tag, "NewSet") == 0) {
+    if (ci == IR_NewSet) {
         size_t n;
         IRNode **items = convert_ir_array(get_field_idx(s, 2), &n);
         result = with_loc(ir_new_set(type, items, n), s);
@@ -1564,7 +1590,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- NewDict ----- */
     /* NewDict: { type, location, values } — 2=values; each entry: { key, value } */
-    if (strcmp(tag, "NewDict") == 0) {
+    if (ci == IR_NewDict) {
         EastValue *vals = get_field_idx(s, 2);
         size_t n = (vals && vals->kind == EAST_VAL_ARRAY) ? vals->data.array.len : 0;
         IRNode **keys = calloc(n > 0 ? n : 1, sizeof(IRNode *));
@@ -1582,7 +1608,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- NewRef ----- */
     /* NewRef: { type, location, value } — 2=value */
-    if (strcmp(tag, "NewRef") == 0) {
+    if (ci == IR_NewRef) {
         IRNode *val = convert_ir(get_field_idx(s, 2));
         result = with_loc(ir_new_ref(type, val), s);
         ir_node_release(val);
@@ -1591,7 +1617,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- NewVector ----- */
     /* NewVector: { type, location, values } — 2=values */
-    if (strcmp(tag, "NewVector") == 0) {
+    if (ci == IR_NewVector) {
         size_t n;
         IRNode **items = convert_ir_array(get_field_idx(s, 2), &n);
         result = with_loc(ir_new_vector(type, items, n), s);
@@ -1601,7 +1627,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- Struct ----- */
     /* Struct: { type, location, fields } — 2=fields; each field: { name, value } */
-    if (strcmp(tag, "Struct") == 0) {
+    if (ci == IR_Struct) {
         EastValue *fields = get_field_idx(s, 2);
         size_t n = (fields && fields->kind == EAST_VAL_ARRAY) ? fields->data.array.len : 0;
         char **names = calloc(n > 0 ? n : 1, sizeof(char *));
@@ -1620,7 +1646,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- GetField ----- */
     /* GetField: { type, location, field, struct } — 2=field, 3=struct */
-    if (strcmp(tag, "GetField") == 0) {
+    if (ci == IR_GetField) {
         IRNode *expr = convert_ir(get_field_idx(s, 3));
         const char *field_name = get_str_idx(s, 2);
         result = with_loc(ir_get_field(type, expr, field_name), s);
@@ -1630,7 +1656,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- Variant ----- */
     /* Variant: { type, location, case, value } — 2=case, 3=value */
-    if (strcmp(tag, "Variant") == 0) {
+    if (ci == IR_Variant) {
         const char *case_name = get_str_idx(s, 2);
         IRNode *val = convert_ir(get_field_idx(s, 3));
         result = with_loc(ir_variant(type, case_name, val), s);
@@ -1640,7 +1666,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- WrapRecursive ----- */
     /* WrapRecursive: { type, location, value } — 2=value */
-    if (strcmp(tag, "WrapRecursive") == 0) {
+    if (ci == IR_WrapRecursive) {
         IRNode *val = convert_ir(get_field_idx(s, 2));
         result = with_loc(ir_wrap_recursive(type, val), s);
         ir_node_release(val);
@@ -1649,7 +1675,7 @@ static IRNode *convert_ir(EastValue *v)
 
     /* ----- UnwrapRecursive ----- */
     /* UnwrapRecursive: { type, location, value } — 2=value */
-    if (strcmp(tag, "UnwrapRecursive") == 0) {
+    if (ci == IR_UnwrapRecursive) {
         IRNode *val = convert_ir(get_field_idx(s, 2));
         result = with_loc(ir_unwrap_recursive(type, val), s);
         ir_node_release(val);
@@ -1657,7 +1683,7 @@ static IRNode *convert_ir(EastValue *v)
     }
 
     /* ----- NewMatrix (not in C IR yet, treat as error) ----- */
-    if (strcmp(tag, "NewMatrix") == 0) {
+    if (ci == IR_NewMatrix) {
         fprintf(stderr, "WARNING: NewMatrix IR node not yet supported in C\n");
         result = ir_value(type, east_null());
         goto cleanup;
