@@ -72,6 +72,7 @@
 EastType *east_type_type = NULL;
 EastType *east_literal_value_type = NULL;
 EastType *east_ir_type = NULL;
+EastType *east_ir_type_with_refs = NULL;
 
 /* ================================================================== */
 /*  Helper: build struct type with sorted fields                       */
@@ -92,6 +93,71 @@ static EastType *make_struct3(const char *n1, EastType *t1,
     const char *names[] = {n1, n2, n3};
     EastType *types[] = {t1, t2, t3};
     return east_struct_type(names, types, 3);
+}
+
+/* ================================================================== */
+/*  transform_type_tree: clone a type tree with substitutions          */
+/* ================================================================== */
+
+static EastType *transform_type_tree(EastType *type,
+                                      EastType *from, EastType *to,
+                                      EastType *rec_from, EastType *rec_to)
+{
+    if (type == from) { east_type_retain(to); return to; }
+    if (rec_from && type == rec_from) { east_type_retain(rec_to); return rec_to; }
+
+    switch (type->kind) {
+    case EAST_TYPE_STRUCT: {
+        size_t nf = type->data.struct_.num_fields;
+        const char **names = malloc(nf * sizeof(char*));
+        EastType **types = malloc(nf * sizeof(EastType*));
+        for (size_t i = 0; i < nf; i++) {
+            names[i] = type->data.struct_.fields[i].name;
+            types[i] = transform_type_tree(type->data.struct_.fields[i].type,
+                                            from, to, rec_from, rec_to);
+        }
+        EastType *result = east_struct_type(names, types, nf);
+        for (size_t i = 0; i < nf; i++) east_type_release(types[i]);
+        free(names);
+        free(types);
+        return result;
+    }
+    case EAST_TYPE_VARIANT: {
+        size_t nc = type->data.variant.num_cases;
+        const char **names = malloc(nc * sizeof(char*));
+        EastType **types = malloc(nc * sizeof(EastType*));
+        for (size_t i = 0; i < nc; i++) {
+            names[i] = type->data.variant.cases[i].name;
+            types[i] = transform_type_tree(type->data.variant.cases[i].type,
+                                            from, to, rec_from, rec_to);
+        }
+        EastType *result = east_variant_type(names, types, nc);
+        for (size_t i = 0; i < nc; i++) east_type_release(types[i]);
+        free(names);
+        free(types);
+        return result;
+    }
+    case EAST_TYPE_ARRAY: {
+        EastType *elem = transform_type_tree(type->data.element,
+                                              from, to, rec_from, rec_to);
+        EastType *result = east_array_type(elem);
+        east_type_release(elem);
+        return result;
+    }
+    case EAST_TYPE_RECURSIVE: {
+        EastType *new_rec = east_recursive_type_new();
+        EastType *new_node = transform_type_tree(type->data.recursive.node,
+                                                  from, to, type, new_rec);
+        east_recursive_type_set(new_rec, new_node);
+        east_recursive_type_finalize(new_rec);
+        /* NOTE: east_recursive_type_set does NOT retain new_node (to avoid
+         * cycles), so we must NOT release it here — it's owned by new_rec. */
+        return new_rec;
+    }
+    default:
+        east_type_retain(type);
+        return type;
+    }
 }
 
 /* ================================================================== */
@@ -353,6 +419,13 @@ void east_type_of_type_init(void)
         east_type_release(c_value);
         east_type_release(c_variable);
         east_type_release(c_variant);
+        /* Build IRTypeWithTableRefs BEFORE releasing intermediates,
+         * since transform_type_tree walks the inner type tree. */
+        east_ir_type_with_refs = transform_type_tree(
+            east_ir_type, east_type_type, &east_integer_type, NULL, NULL);
+
+        /* (no debug) */
+
         east_type_release(c_while);
         east_type_release(c_wrap);
     }

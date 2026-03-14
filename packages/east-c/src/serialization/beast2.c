@@ -91,6 +91,47 @@ typedef struct {
     size_t offset;
 } Beast2EncSlot;
 
+/* Global type table for IR encoding: deduplicates EastTypeValue objects
+ * across all functions in a beast2 file. */
+typedef struct {
+    EastValue **types;      /* unique type values (retained) */
+    size_t count;
+    size_t capacity;
+} Beast2TypeTable;
+
+static void type_table_init(Beast2TypeTable *t) {
+    t->types = NULL;
+    t->count = 0;
+    t->capacity = 0;
+}
+
+static void type_table_free(Beast2TypeTable *t) {
+    for (size_t i = 0; i < t->count; i++)
+        east_value_release(t->types[i]);
+    free(t->types);
+}
+
+/* Returns the index of the type, adding it if not present (structural equality). */
+static size_t type_table_add(Beast2TypeTable *t, EastValue *type_val) {
+    for (size_t i = 0; i < t->count; i++) {
+        if (east_value_equal(t->types[i], type_val)) return i;
+    }
+    if (t->count >= t->capacity) {
+        t->capacity = t->capacity ? t->capacity * 2 : 16;
+        t->types = realloc(t->types, t->capacity * sizeof(EastValue*));
+    }
+    east_value_retain(type_val);
+    t->types[t->count] = type_val;
+    return t->count++;
+}
+
+static int type_table_find(Beast2TypeTable *t, EastValue *type_val) {
+    for (size_t i = 0; i < t->count; i++) {
+        if (east_value_equal(t->types[i], type_val)) return (int)i;
+    }
+    return -1;
+}
+
 typedef struct {
     Beast2EncSlot *slots;
     int mask;          /* capacity - 1 (capacity is power of 2) */
@@ -98,6 +139,8 @@ typedef struct {
     /* Optional: when set, function values are encoded as handle IDs */
     Beast2HandleAllocFn fn_handle_alloc;
     void *fn_handle_user_data;
+    /* Global type table for IR encoding (NULL if not used) */
+    Beast2TypeTable *global_type_table;
 } Beast2EncodeCtx;
 
 typedef struct {
@@ -133,6 +176,9 @@ typedef struct {
     int dedup_hits;
     int dedup_misses;
     size_t dedup_bytes_hashed;
+    /* Global type table for IR decoding (NULL if not used) */
+    EastValue **global_type_table;
+    size_t global_type_table_size;
 #ifdef BEAST2_PROFILE_DEDUP
     /* Per-type dedup stats: open-addressing table keyed by EastType* */
     struct {
@@ -172,6 +218,7 @@ static void beast2_enc_ctx_init(Beast2EncodeCtx *ctx)
     ctx->slots = calloc((size_t)(ctx->mask + 1), sizeof(Beast2EncSlot));
     ctx->fn_handle_alloc = NULL;
     ctx->fn_handle_user_data = NULL;
+    ctx->global_type_table = NULL;
 }
 
 static void beast2_enc_ctx_free(Beast2EncodeCtx *ctx)
@@ -241,6 +288,8 @@ static void beast2_dec_ctx_init(Beast2DecodeCtx *ctx)
     ctx->dedup_hits = 0;
     ctx->dedup_misses = 0;
     ctx->dedup_bytes_hashed = 0;
+    ctx->global_type_table = NULL;
+    ctx->global_type_table_size = 0;
 #ifdef BEAST2_PROFILE_DEDUP
     ctx->type_stats_mask = 255;  /* 256 slots */
     ctx->type_stats_count = 0;
@@ -569,11 +618,265 @@ static void beast2_dedup_print_stats(Beast2DecodeCtx *ctx)
 #endif
 
 /* ================================================================== */
+/*  Generic type-directed IR value walkers                             */
+/*  Walk an EastValue tree guided by an EastType, finding/transforming */
+/*  values at positions where the type matches a target type.          */
+/* ================================================================== */
+
+typedef void (*TypeVisitFn)(EastValue *val, void *ctx);
+typedef EastValue *(*TypeTransformFn)(EastValue *val, void *ctx);
+
+/* Visit all positions in a value tree where the guide type == target. */
+static void visit_type_positions(EastValue *value, EastType *type,
+                                  EastType *target, TypeVisitFn cb, void *ctx)
+{
+    if (!value) return;
+    if (type == target) { cb(value, ctx); return; }
+
+    switch (type->kind) {
+    case EAST_TYPE_RECURSIVE:
+        if (type->data.recursive.node)
+            visit_type_positions(value, type->data.recursive.node, target, cb, ctx);
+        break;
+    case EAST_TYPE_STRUCT:
+        if (value->kind == EAST_VAL_STRUCT) {
+            for (size_t i = 0; i < type->data.struct_.num_fields && i < value->data.struct_.num_fields; i++)
+                visit_type_positions(value->data.struct_.field_values[i],
+                                     type->data.struct_.fields[i].type, target, cb, ctx);
+        }
+        break;
+    case EAST_TYPE_VARIANT:
+        if (value->kind == EAST_VAL_VARIANT) {
+            const char *cn = value->data.variant.case_name;
+            for (size_t i = 0; i < type->data.variant.num_cases; i++) {
+                if (strcmp(type->data.variant.cases[i].name, cn) == 0) {
+                    visit_type_positions(value->data.variant.value,
+                                         type->data.variant.cases[i].type, target, cb, ctx);
+                    break;
+                }
+            }
+        }
+        break;
+    case EAST_TYPE_ARRAY:
+        if (value->kind == EAST_VAL_ARRAY) {
+            for (size_t i = 0; i < value->data.array.len; i++)
+                visit_type_positions(value->data.array.items[i],
+                                     type->data.element, target, cb, ctx);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+/* Transform all positions in a value tree where the guide type == target.
+ * Returns a new retained value (may share structure if no changes). */
+static EastValue *transform_type_positions(EastValue *value, EastType *type,
+                                            EastType *target,
+                                            TypeTransformFn transform, void *ctx)
+{
+    if (!value) return NULL;
+    if (type == target) return transform(value, ctx);
+
+    switch (type->kind) {
+    case EAST_TYPE_RECURSIVE:
+        if (type->data.recursive.node)
+            return transform_type_positions(value, type->data.recursive.node,
+                                             target, transform, ctx);
+        east_value_retain(value);
+        return value;
+    case EAST_TYPE_STRUCT: {
+        if (value->kind != EAST_VAL_STRUCT) { east_value_retain(value); return value; }
+        size_t nf = type->data.struct_.num_fields;
+        if (nf > value->data.struct_.num_fields) nf = value->data.struct_.num_fields;
+        const char **names = malloc(nf * sizeof(char*));
+        EastValue **values = malloc(nf * sizeof(EastValue*));
+        bool changed = false;
+        for (size_t i = 0; i < nf; i++) {
+            names[i] = value->data.struct_.field_names[i];
+            EastValue *fval = value->data.struct_.field_values[i];
+            values[i] = transform_type_positions(fval, type->data.struct_.fields[i].type,
+                                                  target, transform, ctx);
+            if (values[i] != fval) changed = true;
+        }
+        EastValue *result;
+        if (changed) {
+            result = east_struct_new(names, values, nf, value->data.struct_.type);
+        } else {
+            east_value_retain(value);
+            result = value;
+        }
+        for (size_t i = 0; i < nf; i++) east_value_release(values[i]);
+        free(names);
+        free(values);
+        return result;
+    }
+    case EAST_TYPE_VARIANT: {
+        if (value->kind != EAST_VAL_VARIANT) { east_value_retain(value); return value; }
+        const char *cn = value->data.variant.case_name;
+        for (size_t i = 0; i < type->data.variant.num_cases; i++) {
+            if (strcmp(type->data.variant.cases[i].name, cn) == 0) {
+                EastValue *new_val = transform_type_positions(
+                    value->data.variant.value, type->data.variant.cases[i].type,
+                    target, transform, ctx);
+                if (new_val == value->data.variant.value) {
+                    east_value_release(new_val);
+                    east_value_retain(value);
+                    return value;
+                }
+                EastValue *result = east_variant_new(cn, new_val, value->data.variant.type);
+                east_value_release(new_val);
+                return result;
+            }
+        }
+        east_value_retain(value);
+        return value;
+    }
+    case EAST_TYPE_ARRAY: {
+        if (value->kind != EAST_VAL_ARRAY) { east_value_retain(value); return value; }
+        size_t n = value->data.array.len;
+        EastValue *new_arr = east_array_new(value->data.array.elem_type);
+        for (size_t i = 0; i < n; i++) {
+            EastValue *elem = transform_type_positions(
+                value->data.array.items[i], type->data.element,
+                target, transform, ctx);
+            east_array_push(new_arr, elem);
+            east_value_release(elem);
+        }
+        return new_arr;
+    }
+    default:
+        east_value_retain(value);
+        return value;
+    }
+}
+
+/* Collect type callback: adds to Beast2TypeTable */
+static void collect_type_cb(EastValue *val, void *ctx) {
+    type_table_add((Beast2TypeTable*)ctx, val);
+}
+
+/* Substitute type → integer index */
+static EastValue *substitute_type_cb(EastValue *val, void *ctx) {
+    Beast2TypeTable *table = ctx;
+    int idx = type_table_find(table, val);
+    return east_integer(idx >= 0 ? (int64_t)idx : 0);
+}
+
+/* Restore integer index → type value */
+typedef struct { EastValue **types; size_t count; } RestoreCtx;
+static EastValue *restore_type_cb(EastValue *val, void *ctx) {
+    RestoreCtx *rctx = ctx;
+    if (val->kind == EAST_VAL_INTEGER) {
+        int64_t idx = val->data.integer;
+        if (idx >= 0 && (size_t)idx < rctx->count) {
+            east_value_retain(rctx->types[idx]);
+            return rctx->types[idx];
+        }
+    }
+    east_value_retain(val);
+    return val;
+}
+
+/* Pre-scan a typed value tree to collect all IR types from functions. */
+static void pre_scan_for_functions(EastValue *value, EastType *type,
+                                    Beast2TypeTable *table)
+{
+    if (!value) return;
+    switch (type->kind) {
+    case EAST_TYPE_FUNCTION:
+    case EAST_TYPE_ASYNC_FUNCTION: {
+        if (value->kind != EAST_VAL_FUNCTION) break;
+        EastCompiledFn *fn = value->data.function.compiled;
+        if (!fn || !fn->source_ir) break;
+        if (!east_ir_type) east_type_of_type_init();
+        /* Collect types from this function's IR */
+        visit_type_positions(fn->source_ir, east_ir_type, east_type_type,
+                             collect_type_cb, table);
+        /* Scan capture values for nested functions */
+        EastValue *fn_struct = fn->source_ir->data.variant.value;
+        EastValue *caps_arr = east_struct_get_field_idx(fn_struct, 2);
+        if (caps_arr && caps_arr->kind == EAST_VAL_ARRAY) {
+            for (size_t i = 0; i < caps_arr->data.array.len; i++) {
+                EastValue *cap_var = caps_arr->data.array.items[i];
+                EastValue *cap_s = cap_var->data.variant.value;
+                EastValue *type_v = east_struct_get_field_idx(cap_s, 0);
+                EastValue *name_v = east_struct_get_field_idx(cap_s, 2);
+                if (!type_v || !name_v) continue;
+                EastType *cap_type = east_type_from_value(type_v);
+                if (!cap_type) continue;
+                EastValue *cap_val = env_get(fn->captures, name_v->data.string.data);
+                if (cap_val) pre_scan_for_functions(cap_val, cap_type, table);
+                east_type_release(cap_type);
+            }
+        }
+        break;
+    }
+    case EAST_TYPE_RECURSIVE:
+        if (type->data.recursive.node)
+            pre_scan_for_functions(value, type->data.recursive.node, table);
+        break;
+    case EAST_TYPE_STRUCT:
+        if (value->kind == EAST_VAL_STRUCT) {
+            for (size_t i = 0; i < type->data.struct_.num_fields && i < value->data.struct_.num_fields; i++)
+                pre_scan_for_functions(value->data.struct_.field_values[i],
+                                       type->data.struct_.fields[i].type, table);
+        }
+        break;
+    case EAST_TYPE_VARIANT:
+        if (value->kind == EAST_VAL_VARIANT) {
+            const char *cn = value->data.variant.case_name;
+            for (size_t i = 0; i < type->data.variant.num_cases; i++) {
+                if (strcmp(type->data.variant.cases[i].name, cn) == 0) {
+                    pre_scan_for_functions(value->data.variant.value,
+                                           type->data.variant.cases[i].type, table);
+                    break;
+                }
+            }
+        }
+        break;
+    case EAST_TYPE_ARRAY:
+        if (value->kind == EAST_VAL_ARRAY) {
+            for (size_t i = 0; i < value->data.array.len; i++)
+                pre_scan_for_functions(value->data.array.items[i],
+                                       type->data.element, table);
+        }
+        break;
+    case EAST_TYPE_SET:
+        if (value->kind == EAST_VAL_SET) {
+            for (size_t i = 0; i < value->data.set.len; i++)
+                pre_scan_for_functions(value->data.set.items[i],
+                                       type->data.element, table);
+        }
+        break;
+    case EAST_TYPE_DICT:
+        if (value->kind == EAST_VAL_DICT) {
+            for (size_t i = 0; i < value->data.dict.len; i++) {
+                pre_scan_for_functions(value->data.dict.keys[i],
+                                       type->data.dict.key, table);
+                pre_scan_for_functions(value->data.dict.values[i],
+                                       type->data.dict.value, table);
+            }
+        }
+        break;
+    case EAST_TYPE_REF:
+        if (value->kind == EAST_VAL_REF && value->data.ref.value)
+            pre_scan_for_functions(value->data.ref.value, type->data.element, table);
+        break;
+    default:
+        break;
+    }
+}
+
+/* ================================================================== */
 /*  BEAST2 Encoder                                                     */
 /* ================================================================== */
 
 static void beast2_encode_value(ByteBuffer *buf, EastValue *value,
                                 EastType *type, Beast2EncodeCtx *ctx);
+static EastValue *beast2_decode_value(const uint8_t *data, size_t len,
+                                       size_t *offset, EastType *type,
+                                       Beast2DecodeCtx *ctx);
 
 static void beast2_encode_value(ByteBuffer *buf, EastValue *value,
                                 EastType *type, Beast2EncodeCtx *ctx)
@@ -789,8 +1092,22 @@ static void beast2_encode_value(ByteBuffer *buf, EastValue *value,
         /* Ensure IR type is initialized */
         if (!east_ir_type) east_type_of_type_init();
 
-        /* 1. Encode the source IR variant tree */
-        beast2_encode_value(buf, fn->source_ir, east_ir_type, ctx);
+        /* 1. Encode the source IR variant tree (with type table substitution) */
+        if (ctx->global_type_table) {
+            EastValue *indexed_ir = transform_type_positions(
+                fn->source_ir, east_ir_type, east_type_type,
+                substitute_type_cb, ctx->global_type_table);
+
+            {
+                Beast2EncodeCtx ir_ctx;
+                beast2_enc_ctx_init(&ir_ctx);
+                beast2_encode_value(buf, indexed_ir, east_ir_type_with_refs, &ir_ctx);
+                beast2_enc_ctx_free(&ir_ctx);
+            }
+            east_value_release(indexed_ir);
+        } else {
+            beast2_encode_value(buf, fn->source_ir, east_ir_type, ctx);
+        }
 
         /* 2. Extract captures array from source_ir */
         EastValue *fn_struct = fn->source_ir->data.variant.value;
@@ -1221,8 +1538,22 @@ static EastValue *beast2_decode_value(const uint8_t *data, size_t len,
         /* Ensure IR type is initialized */
         if (!east_ir_type) east_type_of_type_init();
 
-        /* 1. Decode IR variant value */
-        EastValue *ir_value = beast2_decode_value(data, len, offset, east_ir_type, ctx);
+        /* 1. Decode IR variant value (with type table restoration) */
+        EastValue *ir_value;
+        if (ctx->global_type_table) {
+            Beast2DecodeCtx ir_dctx;
+            beast2_dec_ctx_init(&ir_dctx);
+            EastValue *indexed_ir = beast2_decode_value(data, len, offset,
+                                                         east_ir_type_with_refs, &ir_dctx);
+            beast2_dec_ctx_free(&ir_dctx);
+            if (!indexed_ir) return NULL;
+            RestoreCtx rctx = { ctx->global_type_table, ctx->global_type_table_size };
+            ir_value = transform_type_positions(indexed_ir, east_ir_type, east_type_type,
+                                                 restore_type_cb, &rctx);
+            east_value_release(indexed_ir);
+        } else {
+            ir_value = beast2_decode_value(data, len, offset, east_ir_type, ctx);
+        }
         if (!ir_value) return NULL;
 
         /* 2. Extract captures array from decoded IR */
@@ -1359,11 +1690,26 @@ ByteBuffer *east_beast2_encode_full(EastValue *value, EastType *type)
         east_value_release(type_val);
     }
 
-    /* 3. Write value data */
+    /* 3. Pre-scan for functions and write global type table */
+    Beast2TypeTable type_table;
+    type_table_init(&type_table);
+    pre_scan_for_functions(value, type, &type_table);
+
+    write_varint(buf, (uint64_t)type_table.count);
+    for (size_t i = 0; i < type_table.count; i++) {
+        Beast2EncodeCtx tt_ctx;
+        beast2_enc_ctx_init(&tt_ctx);
+        beast2_encode_value(buf, type_table.types[i], east_type_type, &tt_ctx);
+        beast2_enc_ctx_free(&tt_ctx);
+    }
+
+    /* 4. Write value data (with type table in context) */
     Beast2EncodeCtx ctx;
     beast2_enc_ctx_init(&ctx);
+    ctx.global_type_table = &type_table;
     beast2_encode_value(buf, value, type, &ctx);
     beast2_enc_ctx_free(&ctx);
+    type_table_free(&type_table);
 
     return buf;
 }
@@ -1391,7 +1737,10 @@ ByteBuffer *east_beast2_encode_full_with_handles(EastValue *value, EastType *typ
         east_value_release(type_val);
     }
 
-    /* 3. Write value data with handle-aware encoder */
+    /* 3. Write empty global type table (handles don't need it) */
+    write_varint(buf, 0);
+
+    /* 4. Write value data with handle-aware encoder */
     Beast2EncodeCtx ctx;
     beast2_enc_ctx_init(&ctx);
     ctx.fn_handle_alloc = alloc_fn;
@@ -1426,14 +1775,39 @@ EastValue *east_beast2_decode_full(const uint8_t *data, size_t len,
     if (schema_val) east_value_release(schema_val);
     else return NULL;
 
-    /* 3. Decode value from remaining data using the provided type */
+    /* 3. Read global type table */
+    uint64_t table_size = read_varint(data, &offset);
+    EastValue **global_tt = NULL;
+    if (table_size > 0) {
+        global_tt = malloc((size_t)table_size * sizeof(EastValue*));
+        for (uint64_t i = 0; i < table_size; i++) {
+            Beast2DecodeCtx tt_ctx;
+            beast2_dec_ctx_init(&tt_ctx);
+            global_tt[i] = beast2_decode_value(data, len, &offset, east_type_type, &tt_ctx);
+            beast2_dec_ctx_free(&tt_ctx);
+            if (!global_tt[i]) {
+                for (uint64_t j = 0; j < i; j++) east_value_release(global_tt[j]);
+                free(global_tt);
+                return NULL;
+            }
+        }
+    }
+
+    /* 4. Decode value from remaining data using the provided type */
     Beast2DecodeCtx dctx;
     beast2_dec_ctx_init(&dctx);
+    dctx.global_type_table = global_tt;
+    dctx.global_type_table_size = (size_t)table_size;
     EastValue *result = beast2_decode_value(data, len, &offset, type, &dctx);
     beast2_dec_ctx_free(&dctx);
+
+    /* Free type table */
+    for (uint64_t i = 0; i < table_size; i++) east_value_release(global_tt[i]);
+    free(global_tt);
+
     if (!result) return NULL;
 
-    /* 4. Verify all bytes consumed — leftover bytes indicate a type mismatch */
+    /* 5. Verify all bytes consumed — leftover bytes indicate a type mismatch */
     if (offset != len) {
         east_value_release(result);
         return NULL;
@@ -1466,18 +1840,43 @@ EastValue *east_beast2_decode_auto(const uint8_t *data, size_t len)
     east_value_release(schema_val);
     if (!type) return NULL;
 
-    /* 3. Decode value using the extracted type */
+    /* 3. Read global type table */
+    uint64_t table_size = read_varint(data, &offset);
+    EastValue **global_tt = NULL;
+    if (table_size > 0) {
+        global_tt = malloc((size_t)table_size * sizeof(EastValue*));
+        for (uint64_t i = 0; i < table_size; i++) {
+            Beast2DecodeCtx tt_ctx;
+            beast2_dec_ctx_init(&tt_ctx);
+            global_tt[i] = beast2_decode_value(data, len, &offset, east_type_type, &tt_ctx);
+            beast2_dec_ctx_free(&tt_ctx);
+            if (!global_tt[i]) {
+                for (uint64_t j = 0; j < i; j++) east_value_release(global_tt[j]);
+                free(global_tt);
+                east_type_release(type);
+                return NULL;
+            }
+        }
+    }
+
+    /* 4. Decode value using the extracted type */
     Beast2DecodeCtx dctx;
     beast2_dec_ctx_init(&dctx);
+    dctx.global_type_table = global_tt;
+    dctx.global_type_table_size = (size_t)table_size;
     EastValue *result = beast2_decode_value(data, len, &offset, type, &dctx);
 #ifdef BEAST2_PROFILE_DEDUP
     beast2_dedup_print_stats(&dctx);
 #endif
     beast2_dec_ctx_free(&dctx);
     east_type_release(type);
+
+    for (uint64_t i = 0; i < table_size; i++) east_value_release(global_tt[i]);
+    free(global_tt);
+
     if (!result) return NULL;
 
-    /* 4. Verify all bytes consumed */
+    /* 5. Verify all bytes consumed */
     if (offset != len) {
         east_value_release(result);
         return NULL;
