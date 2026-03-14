@@ -162,6 +162,9 @@ EastValue *east_function_value(EastCompiledFn *fn);
 void east_value_retain(EastValue *v);
 void east_value_release(EastValue *v);
 
+// Deallocate an EastValue (pool-aware). Called by GC after destroying contents.
+void east_value_dealloc(EastValue *v);
+
 // Compiled function cleanup (defined in compiler.c)
 void east_compiled_fn_free(EastCompiledFn *fn);
 

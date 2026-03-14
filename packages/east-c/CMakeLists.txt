@@ -38,6 +38,11 @@ target_include_directories(east-c PUBLIC include)
 target_link_libraries(east-c PRIVATE m pcre2-8)
 target_compile_definitions(east-c PRIVATE PCRE2_CODE_UNIT_WIDTH=8)
 
+if(EAST_USE_MIMALLOC AND NOT EMSCRIPTEN AND TARGET mimalloc-static)
+    target_link_libraries(east-c PUBLIC mimalloc-static)
+    target_compile_definitions(east-c PUBLIC EAST_USE_MIMALLOC=1)
+endif()
+
 # Tests
 add_executable(test_types tests/test_types.c)
 target_link_libraries(test_types east-c)

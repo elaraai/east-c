@@ -671,6 +671,10 @@ EastValue *east_function_value(EastCompiledFn *fn) {
 /*  Ref counting                                                       */
 /* ------------------------------------------------------------------ */
 
+void east_value_dealloc(EastValue *v) {
+    east_free(v);
+}
+
 void east_value_retain(EastValue *v) {
     if (!v) return;
     if (v->ref_count < 0) return; /* singleton (null) */
@@ -697,18 +701,18 @@ void east_value_release(EastValue *v) {
         break;
 
     case EAST_VAL_STRING:
-        free(v->data.string.data);
+        east_free(v->data.string.data);
         break;
 
     case EAST_VAL_BLOB:
-        free(v->data.blob.data);
+        east_free(v->data.blob.data);
         break;
 
     case EAST_VAL_ARRAY:
         for (size_t i = 0; i < v->data.array.len; i++) {
             east_value_release(v->data.array.items[i]);
         }
-        free(v->data.array.items);
+        east_free(v->data.array.items);
         if (v->data.array.elem_type)
             east_type_release(v->data.array.elem_type);
         break;
@@ -717,7 +721,7 @@ void east_value_release(EastValue *v) {
         for (size_t i = 0; i < v->data.set.len; i++) {
             east_value_release(v->data.set.items[i]);
         }
-        free(v->data.set.items);
+        east_free(v->data.set.items);
         if (v->data.set.elem_type)
             east_type_release(v->data.set.elem_type);
         break;
@@ -727,8 +731,8 @@ void east_value_release(EastValue *v) {
             east_value_release(v->data.dict.keys[i]);
             east_value_release(v->data.dict.values[i]);
         }
-        free(v->data.dict.keys);
-        free(v->data.dict.values);
+        east_free(v->data.dict.keys);
+        east_free(v->data.dict.values);
         if (v->data.dict.key_type)
             east_type_release(v->data.dict.key_type);
         if (v->data.dict.val_type)
@@ -740,8 +744,8 @@ void east_value_release(EastValue *v) {
             free(v->data.struct_.field_names[i]);
             east_value_release(v->data.struct_.field_values[i]);
         }
-        free(v->data.struct_.field_names);
-        free(v->data.struct_.field_values);
+        east_free(v->data.struct_.field_names);
+        east_free(v->data.struct_.field_values);
         if (v->data.struct_.type)
             east_type_release(v->data.struct_.type);
         break;
@@ -757,13 +761,13 @@ void east_value_release(EastValue *v) {
         break;
 
     case EAST_VAL_VECTOR:
-        free(v->data.vector.data);
+        east_free(v->data.vector.data);
         if (v->data.vector.elem_type)
             east_type_release(v->data.vector.elem_type);
         break;
 
     case EAST_VAL_MATRIX:
-        free(v->data.matrix.data);
+        east_free(v->data.matrix.data);
         if (v->data.matrix.elem_type)
             east_type_release(v->data.matrix.elem_type);
         break;
