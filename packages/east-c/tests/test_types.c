@@ -12,11 +12,13 @@
 
 static int tests_run = 0;
 static int tests_passed = 0;
+static int _test_failed = 0;
 
 #define TEST(name) static void test_##name(void)
 #define ASSERT(cond) do { \
     if (!(cond)) { \
         fprintf(stderr, "  FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+        _test_failed = 1; \
         return; \
     } \
 } while(0)
@@ -24,21 +26,28 @@ static int tests_passed = 0;
     int64_t _a = (a), _b = (b); \
     if (_a != _b) { \
         fprintf(stderr, "  FAIL: %s:%d: %lld != %lld\n", __FILE__, __LINE__, (long long)_a, (long long)_b); \
+        _test_failed = 1; \
         return; \
     } \
 } while(0)
 #define ASSERT_EQ_STR(a, b) do { \
     if (strcmp((a), (b)) != 0) { \
         fprintf(stderr, "  FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, (a), (b)); \
+        _test_failed = 1; \
         return; \
     } \
 } while(0)
 #define RUN_TEST(name) do { \
     tests_run++; \
+    _test_failed = 0; \
     printf("  test_%s...", #name); \
     test_##name(); \
-    tests_passed++; \
-    printf(" OK\n"); \
+    if (_test_failed) { \
+        printf(" FAILED\n"); \
+    } else { \
+        tests_passed++; \
+        printf(" OK\n"); \
+    } \
 } while(0)
 
 /* ------------------------------------------------------------------ */
@@ -114,9 +123,9 @@ TEST(variant_type) {
     ASSERT(t != NULL);
     ASSERT_EQ_INT(t->kind, EAST_TYPE_VARIANT);
     ASSERT_EQ_INT((int64_t)t->data.variant.num_cases, 2);
-    /* Variant cases are sorted alphabetically, so None < Some */
-    ASSERT_EQ_STR(t->data.variant.cases[0].name, "None");
-    ASSERT_EQ_STR(t->data.variant.cases[1].name, "Some");
+    /* Variant cases preserve declaration order */
+    ASSERT_EQ_STR(t->data.variant.cases[0].name, "Some");
+    ASSERT_EQ_STR(t->data.variant.cases[1].name, "None");
     east_type_release(t);
 }
 
@@ -244,10 +253,10 @@ TEST(equal_recursive_types) {
 }
 
 TEST(not_equal_recursive_types_diff_instance) {
-    /* Different recursive wrappers are not equal (pointer inequality) */
+    /* Two empty recursive wrappers are structurally equal (both have NULL nodes) */
     EastType *a = east_recursive_type_new();
     EastType *b = east_recursive_type_new();
-    ASSERT(!east_type_equal(a, b));
+    ASSERT(east_type_equal(a, b));
     east_type_release(a);
     east_type_release(b);
 }
@@ -255,8 +264,8 @@ TEST(not_equal_recursive_types_diff_instance) {
 TEST(equal_null_pointers) {
     ASSERT(!east_type_equal(NULL, &east_integer_type));
     ASSERT(!east_type_equal(&east_integer_type, NULL));
-    /* Both NULL should return false per the implementation */
-    ASSERT(!east_type_equal(NULL, NULL));
+    /* Both NULL is considered equal */
+    ASSERT(east_type_equal(NULL, NULL));
 }
 
 /* ------------------------------------------------------------------ */

@@ -492,26 +492,26 @@ static EastType *rec_ctx_pop(RecCtx *ctx, EastType *inner) {
     }
 }
 
-/* EastTypeType case indices (alphabetically sorted by east_variant_type) */
+/* EastTypeType case indices (declaration order — must match names[] in init) */
 enum {
-    TT_ARRAY = 0, TT_ASYNC_FUNCTION = 1, TT_BLOB = 2, TT_BOOLEAN = 3,
-    TT_DATETIME = 4, TT_DICT = 5, TT_FLOAT = 6, TT_FUNCTION = 7,
-    TT_INTEGER = 8, TT_MATRIX = 9, TT_NEVER = 10, TT_NULL = 11,
-    TT_RECURSIVE = 12, TT_REF = 13, TT_SET = 14, TT_STRING = 15,
-    TT_STRUCT = 16, TT_VARIANT = 17, TT_VECTOR = 18
+    TT_NEVER = 0, TT_NULL = 1, TT_BOOLEAN = 2, TT_INTEGER = 3,
+    TT_FLOAT = 4, TT_STRING = 5, TT_DATETIME = 6, TT_BLOB = 7,
+    TT_REF = 8, TT_ARRAY = 9, TT_SET = 10, TT_DICT = 11,
+    TT_STRUCT = 12, TT_VARIANT = 13, TT_RECURSIVE = 14,
+    TT_FUNCTION = 15, TT_ASYNC_FUNCTION = 16, TT_VECTOR = 17, TT_MATRIX = 18
 };
 
-/* IRType case indices (alphabetically sorted by east_variant_type) */
+/* IRType case indices (declaration order — must match ir_names[] in init) */
 enum {
-    IR_As = 0, IR_Assign = 1, IR_AsyncFunction = 2, IR_Block = 3,
-    IR_Break = 4, IR_Builtin = 5, IR_Call = 6, IR_CallAsync = 7,
-    IR_Continue = 8, IR_Error = 9, IR_ForArray = 10, IR_ForDict = 11,
-    IR_ForSet = 12, IR_Function = 13, IR_GetField = 14, IR_IfElse = 15,
-    IR_Let = 16, IR_Match = 17, IR_NewArray = 18, IR_NewDict = 19,
-    IR_NewMatrix = 20, IR_NewRef = 21, IR_NewSet = 22, IR_NewVector = 23,
-    IR_Platform = 24, IR_Return = 25, IR_Struct = 26, IR_TryCatch = 27,
-    IR_UnwrapRecursive = 28, IR_Value = 29, IR_Variable = 30,
-    IR_Variant = 31, IR_While = 32, IR_WrapRecursive = 33
+    IR_Error = 0, IR_TryCatch = 1, IR_Value = 2, IR_Variable = 3,
+    IR_Let = 4, IR_Assign = 5, IR_As = 6, IR_Function = 7,
+    IR_AsyncFunction = 8, IR_Call = 9, IR_CallAsync = 10, IR_NewRef = 11,
+    IR_NewArray = 12, IR_NewSet = 13, IR_NewDict = 14, IR_NewVector = 15,
+    IR_NewMatrix = 16, IR_Struct = 17, IR_GetField = 18, IR_Variant = 19,
+    IR_Block = 20, IR_IfElse = 21, IR_Match = 22, IR_UnwrapRecursive = 23,
+    IR_WrapRecursive = 24, IR_While = 25, IR_ForArray = 26, IR_ForSet = 27,
+    IR_ForDict = 28, IR_Return = 29, IR_Continue = 30, IR_Break = 31,
+    IR_Builtin = 32, IR_Platform = 33
 };
 
 static EastType *east_type_from_value_ctx(EastValue *v, RecCtx *ctx)

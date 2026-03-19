@@ -123,7 +123,6 @@ EastType *east_variant_type(const char **names, EastType **types, size_t count)
             east_type_retain(types[i]);
             cases[i].type = types[i];
         }
-        qsort(cases, count, sizeof(EastTypeField), field_cmp);
     }
 
     t->data.variant.cases = cases;
