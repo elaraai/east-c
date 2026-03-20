@@ -16,6 +16,7 @@ import {
     ArrayType,
     encodeBeast2For,
     decodeBeast2For,
+    decodeBeast2WithHandles,
     variant,
     EastTypeType,
 } from "@elaraai/east";
@@ -39,6 +40,7 @@ export interface EastWasmModule extends EmscriptenModule {
     _east_wasm_set_platform_context: (namePtr: number, tpPtr: number, tpLen: number) => void;
     _east_wasm_last_error: () => number; // returns pointer to null-terminated string, or 0
     _east_wasm_invoke_fn: (handleId: number, argsPtr: number, argsLen: number, resultPtr: number, resultLenPtr: number, errorPtr: number, errorLenPtr: number) => number;
+    _east_wasm_compile_value: (bytesPtr: number, bytesLen: number, resultPtr: number, resultLenPtr: number, errorPtr: number, errorLenPtr: number) => number;
 }
 
 /** Result buffer size (1MB) — matches C side */
@@ -76,6 +78,21 @@ export interface PlatformRegistration {
 export type CompiledHandle = number & { __brand: 'CompiledHandle' };
 
 /**
+ * Result of compileValue(). Contains a JS value tree where functions
+ * are callable WASM-backed handles.
+ */
+export interface CompiledValue {
+    /** The decoded type from the beast2 header. */
+    type: EastTypeValue;
+    /** JS value tree — functions are callable wrappers backed by WASM handles. */
+    value: any;
+    /** All function handles allocated (for cleanup). */
+    handles: CompiledHandle[];
+    /** Release all WASM handles. Must be called when done. */
+    free(): void;
+}
+
+/**
  * EastWasm instance. Created by calling `createEastWasm()` or `createEastWasmFromModule()`.
  */
 export interface EastWasm {
@@ -99,6 +116,13 @@ export interface EastWasm {
 
     /** Run garbage collection on the WASM heap. */
     gc(): void;
+
+    /**
+     * Decode a beast2-full value, compiling embedded functions to WASM.
+     * Returns a JS value tree where functions are callable WASM handles.
+     * Platform must be registered before calling this.
+     */
+    compileValue(bytes: Uint8Array): CompiledValue;
 }
 
 /**
@@ -229,6 +253,63 @@ export function createEastWasmFromModule(
 
         gc(): void {
             mod._east_wasm_gc();
+        },
+
+        compileValue(bytes: Uint8Array): CompiledValue {
+            const bytesPtr = writeBytes(bytes);
+
+            // Use a larger result buffer for compile_value since output can be large
+            const cvResultBufSize = Math.max(RESULT_BUF_SIZE, bytes.length);
+            const cvResultBufPtr = mod._malloc(cvResultBufSize);
+            const cvResultLenPtr = mod._malloc(4);
+            const cvErrorBufPtr = mod._malloc(ERROR_BUF_SIZE);
+            const cvErrorLenPtr = mod._malloc(4);
+
+            new DataView(mod.HEAPU8.buffer, cvResultLenPtr, 4).setUint32(0, cvResultBufSize, true);
+            new DataView(mod.HEAPU8.buffer, cvErrorLenPtr, 4).setUint32(0, ERROR_BUF_SIZE, true);
+
+            const rc = mod._east_wasm_compile_value(
+                bytesPtr, bytes.length,
+                cvResultBufPtr, cvResultLenPtr, cvErrorBufPtr, cvErrorLenPtr,
+            );
+            mod._free(bytesPtr);
+
+            if (rc !== 0) {
+                const errLen = new DataView(mod.HEAPU8.buffer, cvErrorLenPtr, 4).getUint32(0, true);
+                const errBytes = new Uint8Array(mod.HEAPU8.buffer, cvErrorBufPtr, errLen);
+                const msg = new TextDecoder().decode(errBytes);
+                mod._free(cvResultBufPtr);
+                mod._free(cvResultLenPtr);
+                mod._free(cvErrorBufPtr);
+                mod._free(cvErrorLenPtr);
+                throw new Error(`east-c-wasm compile_value: ${msg}`);
+            }
+
+            const resLen = new DataView(mod.HEAPU8.buffer, cvResultLenPtr, 4).getUint32(0, true);
+            const resultBytes = new Uint8Array(mod.HEAPU8.buffer, cvResultBufPtr, resLen).slice();
+            mod._free(cvResultBufPtr);
+            mod._free(cvResultLenPtr);
+            mod._free(cvErrorBufPtr);
+            mod._free(cvErrorLenPtr);
+
+            // Decode beast2-full result with handle-aware decoder
+            const { type, value, handles: handleIds } = decodeBeast2WithHandles(
+                resultBytes,
+                (handleId: number, fnType: EastTypeValue) => {
+                    return createCompiledHandleWrapper(
+                        handleId as CompiledHandle, fnType, mod,
+                        { resultBufPtr, errorBufPtr, resultLenPtr, errorLenPtr },
+                    );
+                },
+            );
+
+            const handles = handleIds.map(id => id as CompiledHandle);
+            return {
+                type,
+                value,
+                handles,
+                free: () => handles.forEach(h => mod._east_wasm_free(h)),
+            };
         },
     };
 }
@@ -451,6 +532,53 @@ function createFnHandleWrapper(
         if (resLen === 0) return null;
 
         const resultBytes = new Uint8Array(mod.HEAPU8.buffer, invokeBufs.resultBufPtr, resLen).slice();
+        return decodeBeast2For(output)(resultBytes);
+    };
+}
+
+/**
+ * Create a JS wrapper around a persistent WASM handle from compileValue().
+ * Uses _east_wasm_call_with_args (persistent handles) instead of _east_wasm_invoke_fn (temp handles).
+ */
+function createCompiledHandleWrapper(
+    handle: CompiledHandle,
+    fnType: EastTypeValue,
+    mod: EastWasmModule,
+    bufs: { resultBufPtr: number; errorBufPtr: number; resultLenPtr: number; errorLenPtr: number },
+): (...args: unknown[]) => unknown {
+    const { inputs, output } = extractFnSignature(fnType);
+
+    return (...jsArgs: unknown[]): unknown => {
+        const encodedArgs: Uint8Array[] = jsArgs.map((arg, i) => {
+            const inputType = inputs[i];
+            if (!inputType) throw new Error(`compiled handle call: no input type for arg ${i}`);
+            return encodeBeast2For(inputType)(arg);
+        });
+        const packedArgs = encodeArgsList(encodedArgs);
+
+        const argsPtr = mod._malloc(packedArgs.length);
+        mod.HEAPU8.set(packedArgs, argsPtr);
+
+        new DataView(mod.HEAPU8.buffer, bufs.resultLenPtr, 4).setUint32(0, RESULT_BUF_SIZE, true);
+        new DataView(mod.HEAPU8.buffer, bufs.errorLenPtr, 4).setUint32(0, ERROR_BUF_SIZE, true);
+
+        const rc = mod._east_wasm_call_with_args(
+            handle, argsPtr, packedArgs.length,
+            bufs.resultBufPtr, bufs.resultLenPtr, bufs.errorBufPtr, bufs.errorLenPtr,
+        );
+
+        mod._free(argsPtr);
+
+        if (rc !== 0) {
+            const errLen = new DataView(mod.HEAPU8.buffer, bufs.errorLenPtr, 4).getUint32(0, true);
+            const errBytes = new Uint8Array(mod.HEAPU8.buffer, bufs.errorBufPtr, errLen);
+            throw new Error(new TextDecoder().decode(errBytes));
+        }
+
+        const resLen = new DataView(mod.HEAPU8.buffer, bufs.resultLenPtr, 4).getUint32(0, true);
+        if (resLen === 0) return null;
+
+        const resultBytes = new Uint8Array(mod.HEAPU8.buffer, bufs.resultBufPtr, resLen).slice();
         return decodeBeast2For(output)(resultBytes);
     };
 }

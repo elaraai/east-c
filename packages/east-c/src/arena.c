@@ -3,9 +3,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ------------------------------------------------------------------ */
-/*  Thin wrappers around the C allocator                               */
-/* ------------------------------------------------------------------ */
+/* When EAST_USE_MIMALLOC is defined, mimalloc-static is linked with override
+ * enabled, replacing malloc/free/calloc/realloc globally at link time.
+ * No source changes needed — all allocations automatically use mimalloc. */
 
 void *east_alloc(size_t size) {
     return malloc(size);

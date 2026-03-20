@@ -11,6 +11,7 @@
 #include <east/east.h>
 #include <east/eval_result.h>
 #include <east/type_of_type.h>
+#include <east/compiler.h>
 #include <east/gc.h>
 
 #include <emscripten.h>
@@ -387,16 +388,22 @@ static PlatformFn platform_bridge_factory(EastType **type_params, size_t num_typ
 
 /* ------------------------------------------------------------------ */
 /*  Handle table for compiled functions                                */
+/*                                                                     */
+/*  Stores EastValue* (EAST_VAL_FUNCTION) instead of raw              */
+/*  EastCompiledFn*, so that compile_value can store function values   */
+/*  with their captures intact via refcounting.                        */
 /* ------------------------------------------------------------------ */
 
 #define MAX_HANDLES 4096
-static EastCompiledFn *g_handles[MAX_HANDLES];
+static EastValue *g_handles[MAX_HANDLES];
 static uint32_t g_next_handle = 1;
 
-static uint32_t alloc_handle(EastCompiledFn *fn) {
+static uint32_t alloc_handle_value(EastValue *fn_value) {
+    if (!fn_value || fn_value->kind != EAST_VAL_FUNCTION) return 0;
     for (uint32_t i = g_next_handle; i < MAX_HANDLES; i++) {
         if (g_handles[i] == NULL) {
-            g_handles[i] = fn;
+            east_value_retain(fn_value);
+            g_handles[i] = fn_value;
             g_next_handle = i + 1;
             return i;
         }
@@ -404,7 +411,8 @@ static uint32_t alloc_handle(EastCompiledFn *fn) {
     /* Wrap around */
     for (uint32_t i = 1; i < g_next_handle; i++) {
         if (g_handles[i] == NULL) {
-            g_handles[i] = fn;
+            east_value_retain(fn_value);
+            g_handles[i] = fn_value;
             g_next_handle = i + 1;
             return i;
         }
@@ -412,13 +420,25 @@ static uint32_t alloc_handle(EastCompiledFn *fn) {
     return 0; /* out of handles */
 }
 
+static uint32_t alloc_handle(EastCompiledFn *fn) {
+    EastValue *fn_value = east_function_value(fn);
+    uint32_t h = alloc_handle_value(fn_value);
+    /* east_function_value creates a value with refcount 1,
+     * alloc_handle_value retains it, so release our ref */
+    east_value_release(fn_value);
+    return h;
+}
+
 static EastCompiledFn *get_handle(uint32_t h) {
     if (h == 0 || h >= MAX_HANDLES) return NULL;
-    return g_handles[h];
+    EastValue *v = g_handles[h];
+    if (!v || v->kind != EAST_VAL_FUNCTION) return NULL;
+    return v->data.function.compiled;
 }
 
 static void free_handle(uint32_t h) {
-    if (h > 0 && h < MAX_HANDLES) {
+    if (h > 0 && h < MAX_HANDLES && g_handles[h]) {
+        east_value_release(g_handles[h]);
         g_handles[h] = NULL;
     }
 }
@@ -842,11 +862,123 @@ int east_wasm_call_with_args(uint32_t handle,
  */
 EMSCRIPTEN_KEEPALIVE
 void east_wasm_free(uint32_t handle) {
-    EastCompiledFn *fn = get_handle(handle);
-    if (fn) {
-        east_compiled_fn_free(fn);
+    if (handle > 0 && handle < MAX_HANDLES && g_handles[handle]) {
         free_handle(handle);
     }
+}
+
+/* ------------------------------------------------------------------ */
+/*  compile_value: decode beast2-full, compile functions, re-encode    */
+/*  with handle IDs at function positions                              */
+/* ------------------------------------------------------------------ */
+
+/* Callback for beast2_encode_full_with_handles */
+static int compile_value_alloc_handle(EastValue *fn_value, void *user_data) {
+    (void)user_data;
+    return (int)alloc_handle_value(fn_value);
+}
+
+/*
+ * Decode a beast2-full value, compiling embedded functions to WASM.
+ * Re-encodes the value with handle IDs at function positions.
+ *
+ * bytes/len: beast2-full encoded input
+ * result_buf/result_len: [out] re-encoded beast2-full with handle IDs
+ * error_buf/error_len: [out] error message on failure
+ *
+ * Returns: 0 = success, 1 = error
+ */
+EMSCRIPTEN_KEEPALIVE
+int east_wasm_compile_value(
+    const uint8_t *bytes, uint32_t len,
+    uint8_t *result_buf, uint32_t *result_len,
+    uint8_t *error_buf, uint32_t *error_len)
+{
+    clear_last_error();
+    if (!g_initialized) {
+        const char *msg = "east_wasm_init() not called";
+        uint32_t mlen = (uint32_t)strlen(msg);
+        if (mlen > *error_len) mlen = *error_len;
+        memcpy(error_buf, msg, mlen);
+        *error_len = mlen;
+        *result_len = 0;
+        return 1;
+    }
+
+    /* Set thread context so beast2 decoder can compile functions */
+    east_set_thread_context(g_platform, g_builtins);
+
+    double t0 = emscripten_get_now();
+
+    /* 1. Decode beast2-full with auto type detection */
+    EastValue *value = east_beast2_decode_auto(bytes, len);
+    if (!value) {
+        const char *msg = "failed to decode beast2-full value";
+        uint32_t mlen = (uint32_t)strlen(msg);
+        if (mlen > *error_len) mlen = *error_len;
+        memcpy(error_buf, msg, mlen);
+        *error_len = mlen;
+        *result_len = 0;
+        return 1;
+    }
+
+    double t1 = emscripten_get_now();
+
+    /* 2. Extract type from beast2 header */
+    EastType *type = east_beast2_extract_type(bytes, len);
+
+    if (!type) {
+        east_value_release(value);
+        const char *msg = "failed to decode type from beast2 header";
+        uint32_t mlen = (uint32_t)strlen(msg);
+        if (mlen > *error_len) mlen = *error_len;
+        memcpy(error_buf, msg, mlen);
+        *error_len = mlen;
+        *result_len = 0;
+        return 1;
+    }
+
+    double t2 = emscripten_get_now();
+
+    /* 3. Re-encode with handle IDs at function positions */
+    ByteBuffer *buf = east_beast2_encode_full_with_handles(
+        value, type, compile_value_alloc_handle, NULL);
+
+    double t3 = emscripten_get_now();
+
+    east_value_release(value);
+    east_type_release(type);
+
+    double t4 = emscripten_get_now();
+    emscripten_log(EM_LOG_CONSOLE, "compile_value: decode=%.1fms type=%.1fms encode=%.1fms release=%.1fms total=%.1fms",
+        t1-t0, t2-t1, t3-t2, t4-t3, t4-t0);
+
+    if (!buf) {
+        const char *msg = "failed to re-encode value with handles";
+        uint32_t mlen = (uint32_t)strlen(msg);
+        if (mlen > *error_len) mlen = *error_len;
+        memcpy(error_buf, msg, mlen);
+        *error_len = mlen;
+        *result_len = 0;
+        return 1;
+    }
+
+    /* 4. Copy result to output buffer */
+    if (buf->len > *result_len) {
+        const char *msg = "result buffer too small";
+        uint32_t mlen = (uint32_t)strlen(msg);
+        if (mlen > *error_len) mlen = *error_len;
+        memcpy(error_buf, msg, mlen);
+        *error_len = mlen;
+        *result_len = 0;
+        byte_buffer_free(buf);
+        return 1;
+    }
+
+    memcpy(result_buf, buf->data, buf->len);
+    *result_len = (uint32_t)buf->len;
+    byte_buffer_free(buf);
+    return 0;
 }
 
 /*

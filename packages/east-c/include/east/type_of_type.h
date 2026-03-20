@@ -21,6 +21,7 @@
 extern EastType *east_type_type;          // Recursive variant: 19 type cases
 extern EastType *east_literal_value_type; // Variant: 7 literal value cases
 extern EastType *east_ir_type;            // Recursive variant: 34 IR node cases
+extern EastType *east_ir_type_with_refs;  // IRType with EastTypeType → IntegerType (for type table)
 
 // Initialize the type descriptors. Call once at startup.
 void east_type_of_type_init(void);

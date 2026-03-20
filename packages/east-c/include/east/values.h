@@ -73,9 +73,10 @@ struct EastValue {
             EastType *type;
         } struct_;
         struct {
-            char *case_name;
             EastValue *value;
             EastType *type;
+            size_t case_idx;        /* index into type->data.variant.cases[] (SIZE_MAX if unknown) */
+            const char *case_tag;   /* NOT owned — points into type's cases or string literal */
         } variant;
         struct {
             EastValue *value;
@@ -132,8 +133,21 @@ size_t east_dict_len(EastValue *dict);
 
 EastValue *east_struct_new(const char **names, EastValue **values, size_t count, EastType *type);
 EastValue *east_struct_get_field(EastValue *s, const char *name);
+static inline EastValue *east_struct_get_field_idx(EastValue *s, size_t idx) {
+    return (s && s->kind == EAST_VAL_STRUCT && idx < s->data.struct_.num_fields)
+        ? s->data.struct_.field_values[idx]
+        : NULL;
+}
 
 EastValue *east_variant_new(const char *case_name, EastValue *value, EastType *type);
+EastValue *east_variant_new_idx(size_t case_idx, EastValue *value, EastType *type);
+
+/* Get the case name. Returns "" if not set. */
+static inline const char *east_variant_case_name(EastValue *v) {
+    if (v && v->kind == EAST_VAL_VARIANT && v->data.variant.case_tag)
+        return v->data.variant.case_tag;
+    return "";
+}
 
 EastValue *east_ref_new(EastValue *value);
 EastValue *east_ref_get(EastValue *ref);
@@ -147,6 +161,9 @@ EastValue *east_function_value(EastCompiledFn *fn);
 // Ref counting
 void east_value_retain(EastValue *v);
 void east_value_release(EastValue *v);
+
+// Deallocate an EastValue (pool-aware). Called by GC after destroying contents.
+void east_value_dealloc(EastValue *v);
 
 // Compiled function cleanup (defined in compiler.c)
 void east_compiled_fn_free(EastCompiledFn *fn);

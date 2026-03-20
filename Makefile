@@ -1,9 +1,13 @@
-.PHONY: build rebuild test clean install install-cli services-up services-down compliance compliance-std compliance-wasm compliance-all leak-check leak-check-std leak-check-all setup-wasm wasm wasm-clean
+.PHONY: update build rebuild test clean install install-cli services-up services-down compliance compliance-std compliance-wasm compliance-all leak-check leak-check-std leak-check-all setup-wasm wasm wasm-clean
 
 build:
 	@mkdir -p build && cd build && cmake .. && cmake --build . -j$$(nproc)
 
 rebuild: clean build
+
+# Update @elaraai dependencies (including transitive)
+update:
+	@cd packages/east-c-wasm && $(NVM) npm update @elaraai/east @elaraai/east-node-std
 
 test: build
 	@cd build && ctest --output-on-failure

@@ -849,4 +849,137 @@ describe('east-c-wasm', async () => {
     await test('gc does not crash', () => {
         wasm.gc();
     });
+
+    // ========================================================================
+    // compileValue tests
+    // ========================================================================
+
+    await test('compileValue — simple value with no functions', async () => {
+        const type = StructType({ x: IntegerType, y: StringType });
+        const value = { x: 42n, y: "hello" };
+        const bytes = encodeBeast2For(type)(value);
+
+        const compiled = wasm.compileValue(bytes);
+        assert.ok(compiled, 'should return a CompiledValue');
+        assert.equal(compiled.value.x, 42n);
+        assert.equal(compiled.value.y, "hello");
+        assert.equal(compiled.handles.length, 0, 'no function handles expected');
+        compiled.free();
+    });
+
+    await test('compileValue — value containing a single function', async () => {
+        const fnType = FunctionType([IntegerType], IntegerType);
+        const structType = StructType({ name: StringType, transform: fnType });
+
+        // Create a function and encode it as part of a struct
+        const fn = East.function([IntegerType], IntegerType, ($, x) => {
+            return x.multiply(2n);
+        });
+        const compiled = East.compile(fn, []);
+        const value = { name: "doubler", transform: compiled };
+        const bytes = encodeBeast2For(structType)(value);
+
+        const result = wasm.compileValue(bytes);
+        assert.ok(result, 'should return a CompiledValue');
+        assert.equal(result.value.name, "doubler");
+        assert.equal(result.handles.length, 1, 'should have one function handle');
+
+        // Call the function handle
+        const transformResult = result.value.transform(21n);
+        assert.equal(transformResult, 42n);
+
+        result.free();
+    });
+
+    await test('compileValue — value containing nested/captured functions', async () => {
+        const innerFnType = FunctionType([IntegerType], IntegerType);
+        const outerFnType = FunctionType([IntegerType], IntegerType);
+        const structType = StructType({ a: outerFnType, b: innerFnType });
+
+        // Two functions: b captures nothing, a captures a multiplier and uses it
+        const fnA = East.function([IntegerType], IntegerType, ($, x) => {
+            const multiplier = $.const(10n, IntegerType);
+            return x.multiply(multiplier);
+        });
+        const fnB = East.function([IntegerType], IntegerType, ($, x) => {
+            return x.add(1n);
+        });
+        const value = { a: East.compile(fnA, []), b: East.compile(fnB, []) };
+        const bytes = encodeBeast2For(structType)(value);
+
+        const result = wasm.compileValue(bytes);
+        assert.ok(result, 'should return a CompiledValue');
+        assert.equal(result.handles.length, 2, 'should have two function handles');
+
+        assert.equal(result.value.a(5n), 50n);
+        assert.equal(result.value.b(5n), 6n);
+
+        result.free();
+    });
+
+    await test('compileValue — roundtrip: call function handles and verify results', async () => {
+        const fnType = FunctionType([IntegerType, IntegerType], IntegerType);
+        const bytes = encodeBeast2For(fnType)(
+            East.compile(East.function([IntegerType, IntegerType], IntegerType, ($, a, b) => {
+                return a.add(b).multiply(2n);
+            }), [])
+        );
+
+        const result = wasm.compileValue(bytes);
+        assert.ok(result);
+        assert.equal(result.handles.length, 1);
+
+        // The value itself is the function wrapper
+        assert.equal(result.value(3n, 4n), 14n);  // (3+4)*2 = 14
+        assert.equal(result.value(10n, 20n), 60n); // (10+20)*2 = 60
+
+        result.free();
+    });
+
+    await test('compileValue — array of functions', async () => {
+        const fnType = FunctionType([IntegerType], IntegerType);
+        const arrType = ArrayType(fnType);
+
+        const fns = [
+            East.compile(East.function([IntegerType], IntegerType, ($, x) => x.add(1n)), []),
+            East.compile(East.function([IntegerType], IntegerType, ($, x) => x.multiply(2n)), []),
+            East.compile(East.function([IntegerType], IntegerType, ($, x) => x.multiply(x)), []),
+        ];
+        const bytes = encodeBeast2For(arrType)(fns);
+
+        const result = wasm.compileValue(bytes);
+        assert.ok(result);
+        assert.equal(result.handles.length, 3);
+        assert.equal(result.value.length, 3);
+
+        assert.equal(result.value[0](5n), 6n);   // 5+1
+        assert.equal(result.value[1](5n), 10n);  // 5*2
+        assert.equal(result.value[2](5n), 25n);  // 5*5
+
+        result.free();
+    });
+
+    await test('compileValue — /tmp/ui.beast2 (33MB real-world UI component)', async () => {
+        const { readFileSync, existsSync } = await import('node:fs');
+        const path = '/tmp/ui.beast2';
+        if (!existsSync(path)) {
+            console.log('SKIP: /tmp/ui.beast2 not found');
+            return;
+        }
+
+        const bytes = readFileSync(path);
+        console.log(`  input: ${(bytes.length / 1024 / 1024).toFixed(1)}MB`);
+
+        const t0 = performance.now();
+        const result = wasm.compileValue(new Uint8Array(bytes));
+        const elapsed = performance.now() - t0;
+        console.log(`  compileValue: ${elapsed.toFixed(1)}ms`);
+        console.log(`  handles: ${result.handles.length}`);
+        console.log(`  type: ${result.type.type}`);
+
+        assert.ok(result, 'should return a CompiledValue');
+        assert.ok(result.handles.length > 0, 'should have function handles');
+
+        result.free();
+    });
 });

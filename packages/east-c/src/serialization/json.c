@@ -389,14 +389,10 @@ static void json_encode_value(StrBuf *sb, EastValue *value, EastType *type)
     }
 
     case EAST_TYPE_VARIANT: {
-        const char *case_name = value->data.variant.case_name;
-        EastType *case_type = NULL;
-        for (size_t i = 0; i < type->data.variant.num_cases; i++) {
-            if (strcmp(type->data.variant.cases[i].name, case_name) == 0) {
-                case_type = type->data.variant.cases[i].type;
-                break;
-            }
-        }
+        size_t ci = value->data.variant.case_idx;
+        const char *case_name = east_variant_case_name(value);
+        EastType *case_type = (ci < type->data.variant.num_cases)
+            ? type->data.variant.cases[ci].type : NULL;
         strbuf_append_str(sb, "{\"type\":");
         strbuf_append_json_string(sb, case_name, strlen(case_name));
         strbuf_append_str(sb, ",\"value\":");

@@ -33,6 +33,8 @@ ByteBuffer *east_beast2_encode_full(EastValue *value, EastType *type);
 EastValue *east_beast2_decode_full(const uint8_t *data, size_t len, EastType *type);
 // BEAST2-full decode using the embedded type schema (self-describing)
 EastValue *east_beast2_decode_auto(const uint8_t *data, size_t len);
+// Extract the type schema from beast2-full encoded data (returns retained EastType*)
+EastType *east_beast2_extract_type(const uint8_t *data, size_t len);
 
 // Beast v1 binary serialization (magic + type schema + twiddled values)
 ByteBuffer *east_beast_encode(EastValue *value, EastType *type);
@@ -53,6 +55,12 @@ EastValue *east_parse_value(const char *text, EastType *type);
 EastValue *east_parse_value_with_error(const char *text, EastType *type, char **error_out);
 char *east_print_type(EastType *type);
 EastType *east_parse_type(const char *text);
+
+// BEAST2 with handles: re-encodes function values as handle IDs instead of IR+captures.
+// alloc_fn is called for each function value; returns handle ID (>0) or 0 on error.
+typedef int (*Beast2HandleAllocFn)(EastValue *fn_value, void *user_data);
+ByteBuffer *east_beast2_encode_full_with_handles(EastValue *value, EastType *type,
+                                                  Beast2HandleAllocFn alloc_fn, void *user_data);
 
 // Binary utilities
 void write_varint(ByteBuffer *buf, uint64_t val);

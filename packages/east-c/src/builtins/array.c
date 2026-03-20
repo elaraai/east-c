@@ -12,6 +12,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Option type context: set by factory, used by impl (immediate call, no interleave) */
+static _Thread_local EastType *_option_ctx = NULL;
+static EastType *_make_option_type(EastType *inner) {
+    const char *names[] = {"none", "some"};
+    EastType *types[] = {&east_null_type, inner};
+    return east_variant_type(names, types, 2);
+}
+
 /* ------------------------------------------------------------------ */
 /* Helper: call a function value with given args                      */
 /* ------------------------------------------------------------------ */
@@ -94,9 +102,9 @@ static EastValue *array_try_get_impl(EastValue **args, size_t n) {
     int64_t index = args[1]->data.integer;
     if (index >= 0 && (size_t)index < east_array_len(args[0])) {
         EastValue *val = east_array_get(args[0], (size_t)index);
-        return east_variant_new("some", val, NULL);
+        return east_variant_new("some", val, _option_ctx);
     }
-    return east_variant_new("none", east_null(), NULL);
+    return east_variant_new("none", east_null(), _option_ctx);
 }
 
 /* ================================================================== */
@@ -637,11 +645,11 @@ static EastValue *array_find_first_impl(EastValue **args, size_t n) {
         if (!key) return NULL;
         if (east_value_compare(key, target) == 0) {
             east_value_release(key);
-            return east_variant_new("some", east_integer((int64_t)i), NULL);
+            return east_variant_new("some", east_integer((int64_t)i), _option_ctx);
         }
         east_value_release(key);
     }
-    return east_variant_new("none", east_null(), NULL);
+    return east_variant_new("none", east_null(), _option_ctx);
 }
 
 /* ================================================================== */
@@ -712,7 +720,7 @@ static EastValue *array_filter_map_impl(EastValue **args, size_t n) {
         EastValue *opt = call_fn(fn, call_args, 2);
         if (!opt) { east_value_release(idx); east_value_release(result); return NULL; }
         /* Check if variant is "some" */
-        if (opt->kind == EAST_VAL_VARIANT && strcmp(opt->data.variant.case_name, "some") == 0) {
+        if (opt->kind == EAST_VAL_VARIANT && strcmp(east_variant_case_name(opt), "some") == 0) {
             east_array_push(result, opt->data.variant.value);
         }
         east_value_release(idx);
@@ -735,12 +743,12 @@ static EastValue *array_first_map_impl(EastValue **args, size_t n) {
         EastValue *opt = call_fn(fn, call_args, 2);
         if (!opt) { east_value_release(idx); return NULL; }
         east_value_release(idx);
-        if (opt->kind == EAST_VAL_VARIANT && strcmp(opt->data.variant.case_name, "some") == 0) {
+        if (opt->kind == EAST_VAL_VARIANT && strcmp(east_variant_case_name(opt), "some") == 0) {
             return opt;
         }
         east_value_release(opt);
     }
-    return east_variant_new("none", east_null(), NULL);
+    return east_variant_new("none", east_null(), _option_ctx);
 }
 
 /* ================================================================== */
@@ -1122,7 +1130,11 @@ static BuiltinImpl array_size_factory(EastType **tp, size_t ntp) { (void)tp; (vo
 static BuiltinImpl array_has_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_has_impl; }
 static BuiltinImpl array_get_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_get_impl; }
 static BuiltinImpl array_get_or_default_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_get_or_default_impl; }
-static BuiltinImpl array_try_get_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_try_get_impl; }
+static BuiltinImpl array_try_get_factory(EastType **tp, size_t ntp) {
+    if (_option_ctx) east_type_release(_option_ctx);
+    _option_ctx = (ntp > 0) ? _make_option_type(tp[0]) : NULL;
+    return array_try_get_impl;
+}
 static BuiltinImpl array_update_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_update_impl; }
 static BuiltinImpl array_merge_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_merge_impl; }
 static BuiltinImpl array_push_last_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_push_last_impl; }
@@ -1138,10 +1150,30 @@ static BuiltinImpl array_reverse_in_place_factory(EastType **tp, size_t ntp) { (
 static BuiltinImpl array_sort_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_sort_impl; }
 static BuiltinImpl array_reverse_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_reverse_impl; }
 static BuiltinImpl array_is_sorted_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_is_sorted_impl; }
-static BuiltinImpl array_find_sorted_first_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_find_sorted_first_impl; }
-static BuiltinImpl array_find_sorted_last_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_find_sorted_last_impl; }
-static BuiltinImpl array_find_sorted_range_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_find_sorted_range_impl; }
-static BuiltinImpl array_find_first_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_find_first_impl; }
+static BuiltinImpl array_find_sorted_first_factory(EastType **tp, size_t ntp) {
+    (void)tp; (void)ntp;
+    if (_option_ctx) east_type_release(_option_ctx);
+    _option_ctx = _make_option_type(&east_integer_type);
+    return array_find_sorted_first_impl;
+}
+static BuiltinImpl array_find_sorted_last_factory(EastType **tp, size_t ntp) {
+    (void)tp; (void)ntp;
+    if (_option_ctx) east_type_release(_option_ctx);
+    _option_ctx = _make_option_type(&east_integer_type);
+    return array_find_sorted_last_impl;
+}
+static BuiltinImpl array_find_sorted_range_factory(EastType **tp, size_t ntp) {
+    (void)tp; (void)ntp;
+    if (_option_ctx) east_type_release(_option_ctx);
+    _option_ctx = _make_option_type(&east_integer_type);
+    return array_find_sorted_range_impl;
+}
+static BuiltinImpl array_find_first_factory(EastType **tp, size_t ntp) {
+    (void)tp; (void)ntp;
+    if (_option_ctx) east_type_release(_option_ctx);
+    _option_ctx = _make_option_type(&east_integer_type);
+    return array_find_first_impl;
+}
 static BuiltinImpl array_concat_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_concat_impl; }
 static BuiltinImpl array_slice_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_slice_impl; }
 static BuiltinImpl array_get_keys_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_get_keys_impl; }
@@ -1150,7 +1182,12 @@ static BuiltinImpl array_copy_factory(EastType **tp, size_t ntp) { (void)tp; (vo
 static BuiltinImpl array_map_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_map_impl; }
 static BuiltinImpl array_filter_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_filter_impl; }
 static BuiltinImpl array_filter_map_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_filter_map_impl; }
-static BuiltinImpl array_first_map_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_first_map_impl; }
+static BuiltinImpl array_first_map_factory(EastType **tp, size_t ntp) {
+    /* firstMap returns the callback's Option result — we need Option(V) from tp[1] if available */
+    if (_option_ctx) east_type_release(_option_ctx);
+    _option_ctx = (ntp > 0) ? _make_option_type(tp[0]) : NULL;
+    return array_first_map_impl;
+}
 static BuiltinImpl array_map_reduce_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_map_reduce_impl; }
 static BuiltinImpl array_fold_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_fold_impl; }
 static BuiltinImpl array_string_join_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return array_string_join_impl; }

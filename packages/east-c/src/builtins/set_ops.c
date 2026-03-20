@@ -9,6 +9,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+static _Thread_local EastType *_option_ctx = NULL;
+static EastType *_make_option_type(EastType *inner) {
+    const char *names[] = {"none", "some"};
+    EastType *types[] = {&east_null_type, inner};
+    return east_variant_type(names, types, 2);
+}
+
 /* Element type for error messages, set by factories from type_params[0] (K) */
 static _Thread_local EastType *s_set_elem_type = NULL;
 
@@ -278,7 +285,7 @@ static EastValue *set_filter_map_impl(EastValue **args, size_t n) {
         EastValue *call_args[] = { s->data.set.items[i] };
         EastValue *opt = call_fn(fn, call_args, 1);
         if (!opt) { east_value_release(result); return NULL; }
-        if (opt->kind == EAST_VAL_VARIANT && strcmp(opt->data.variant.case_name, "some") == 0)
+        if (opt->kind == EAST_VAL_VARIANT && strcmp(east_variant_case_name(opt), "some") == 0)
             east_dict_set(result, s->data.set.items[i], opt->data.variant.value);
         east_value_release(opt);
     }
@@ -293,11 +300,11 @@ static EastValue *set_first_map_impl(EastValue **args, size_t n) {
         EastValue *call_args[] = { s->data.set.items[i] };
         EastValue *opt = call_fn(fn, call_args, 1);
         if (!opt) return NULL;
-        if (opt->kind == EAST_VAL_VARIANT && strcmp(opt->data.variant.case_name, "some") == 0)
+        if (opt->kind == EAST_VAL_VARIANT && strcmp(east_variant_case_name(opt), "some") == 0)
             return opt;
         east_value_release(opt);
     }
-    return east_variant_new("none", east_null(), NULL);
+    return east_variant_new("none", east_null(), _option_ctx);
 }
 
 static EastValue *set_map_reduce_impl(EastValue **args, size_t n) {
@@ -530,7 +537,11 @@ static BuiltinImpl set_for_each_factory(EastType **tp, size_t ntp) { (void)tp; (
 static BuiltinImpl set_map_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return set_map_impl; }
 static BuiltinImpl set_filter_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return set_filter_impl; }
 static BuiltinImpl set_filter_map_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return set_filter_map_impl; }
-static BuiltinImpl set_first_map_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return set_first_map_impl; }
+static BuiltinImpl set_first_map_factory(EastType **tp, size_t ntp) {
+    (void)tp; (void)ntp;
+    /* Return type is Option<V> — we don't have V here, leave _option_ctx as-is from prior factory */
+    return set_first_map_impl;
+}
 static BuiltinImpl set_map_reduce_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return set_map_reduce_impl; }
 static BuiltinImpl set_reduce_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return set_reduce_impl; }
 static BuiltinImpl set_to_array_factory(EastType **tp, size_t ntp) { (void)tp; (void)ntp; return set_to_array_impl; }

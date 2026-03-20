@@ -30,7 +30,7 @@ import {
 } from './common.js';
 
 // Re-export all types from common
-export type { PlatformFn, GenericPlatformFactory, PlatformRegistration, CompiledHandle, EastWasm, EastWasmOptions, EastWasmModule } from './common.js';
+export type { PlatformFn, GenericPlatformFactory, PlatformRegistration, CompiledHandle, CompiledValue, EastWasm, EastWasmOptions, EastWasmModule } from './common.js';
 export { createEastWasmFromModule, registerPlatformFunctions } from './common.js';
 
 /**

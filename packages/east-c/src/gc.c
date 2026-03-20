@@ -1,5 +1,6 @@
 #include "east/gc.h"
 #include "east/values.h"
+#include "east/arena.h"
 #include "east/compiler.h"
 #include "east/env.h"
 #include "east/hashmap.h"
@@ -175,7 +176,7 @@ static void gc_destroy_contents(EastValue *v) {
     case EAST_VAL_ARRAY:
         for (size_t i = 0; i < v->data.array.len; i++)
             east_value_release(v->data.array.items[i]);
-        free(v->data.array.items);
+        east_free(v->data.array.items);
         if (v->data.array.elem_type)
             east_type_release(v->data.array.elem_type);
         v->data.array.items = NULL;
@@ -185,7 +186,7 @@ static void gc_destroy_contents(EastValue *v) {
     case EAST_VAL_SET:
         for (size_t i = 0; i < v->data.set.len; i++)
             east_value_release(v->data.set.items[i]);
-        free(v->data.set.items);
+        east_free(v->data.set.items);
         if (v->data.set.elem_type)
             east_type_release(v->data.set.elem_type);
         v->data.set.items = NULL;
@@ -197,8 +198,8 @@ static void gc_destroy_contents(EastValue *v) {
             east_value_release(v->data.dict.keys[i]);
             east_value_release(v->data.dict.values[i]);
         }
-        free(v->data.dict.keys);
-        free(v->data.dict.values);
+        east_free(v->data.dict.keys);
+        east_free(v->data.dict.values);
         if (v->data.dict.key_type)
             east_type_release(v->data.dict.key_type);
         if (v->data.dict.val_type)
@@ -213,8 +214,8 @@ static void gc_destroy_contents(EastValue *v) {
             free(v->data.struct_.field_names[i]);
             east_value_release(v->data.struct_.field_values[i]);
         }
-        free(v->data.struct_.field_names);
-        free(v->data.struct_.field_values);
+        east_free(v->data.struct_.field_names);
+        east_free(v->data.struct_.field_values);
         if (v->data.struct_.type)
             east_type_release(v->data.struct_.type);
         v->data.struct_.field_names = NULL;
@@ -223,11 +224,9 @@ static void gc_destroy_contents(EastValue *v) {
         break;
 
     case EAST_VAL_VARIANT:
-        free(v->data.variant.case_name);
         east_value_release(v->data.variant.value);
         if (v->data.variant.type)
             east_type_release(v->data.variant.type);
-        v->data.variant.case_name = NULL;
         v->data.variant.value = NULL;
         break;
 
@@ -317,9 +316,9 @@ void east_gc_collect(void) {
         gc_destroy_contents(garbage[i]);
     }
 
-    /* 4c: Free the garbage objects themselves */
+    /* 4c: Free the garbage objects themselves (pool-aware) */
     for (size_t i = 0; i < garbage_len; i++) {
-        free(garbage[i]);
+        east_value_dealloc(garbage[i]);
     }
 
     free(garbage);

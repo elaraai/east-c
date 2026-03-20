@@ -681,15 +681,11 @@ static void beast_encode_value(ByteBuffer *buf, EastValue *value,
 
     case EAST_TYPE_VARIANT: {
         /* 1 byte: case index (0-based), then case value */
-        const char *case_name = value->data.variant.case_name;
-        for (size_t i = 0; i < type->data.variant.num_cases; i++) {
-            if (strcmp(type->data.variant.cases[i].name, case_name) == 0) {
-                byte_buffer_write_u8(buf, (uint8_t)i);
-                beast_encode_value(buf, value->data.variant.value,
-                                   type->data.variant.cases[i].type);
-                break;
-            }
-        }
+        size_t ci = value->data.variant.case_idx;
+        byte_buffer_write_u8(buf, (uint8_t)ci);
+        if (ci < type->data.variant.num_cases)
+            beast_encode_value(buf, value->data.variant.value,
+                               type->data.variant.cases[ci].type);
         break;
     }
 
@@ -872,14 +868,14 @@ static EastValue *beast_decode_value(const uint8_t *data, size_t len,
         uint8_t case_idx = data[(*offset)++];
         if (case_idx >= type->data.variant.num_cases) return NULL;
 
-        const char *case_name = type->data.variant.cases[case_idx].name;
+        /* case_idx already numeric from the byte */
         EastType *case_type = type->data.variant.cases[case_idx].type;
 
         EastValue *case_value = beast_decode_value(data, len, offset,
                                                    case_type);
         if (!case_value) return NULL;
 
-        EastValue *result = east_variant_new(case_name, case_value, type);
+        EastValue *result = east_variant_new_idx(case_idx, case_value, type);
         east_value_release(case_value);
         return result;
     }
